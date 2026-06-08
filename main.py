@@ -1,0 +1,748 @@
+"""
+Telegram Calendar Agent Bot — main entry point.
+
+Wires together auth, intent parsing, calendar operations, clash detection,
+and session memory into a fully async python-telegram-bot v20+ application.
+"""
+
+from __future__ import annotations
+
+import datetime
+import logging
+
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+import auth
+import calendar_service
+import clash_detector
+import intent_parser
+import session_memory as sm_module
+from config import DEFAULT_DURATION_MINUTES, TELEGRAM_TOKEN, TIMEZONE, TZ
+from intent_parser import UNKNOWN_REPLY
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Global shared state (single-user bot)
+# ---------------------------------------------------------------------------
+
+session_memory = sm_module.SessionMemory()
+_calendars_cache: list[dict] = []  # populated on first authenticated request
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_service_and_calendars():
+    """
+    Load Google credentials, build the API service, and refresh the calendars cache.
+
+    Returns:
+        (service, calendars) or (None, None) if not authenticated.
+    """
+    global _calendars_cache
+    creds = auth.load_credentials()
+    if not creds:
+        return None, None
+    service = calendar_service.build_service(creds)
+    if not _calendars_cache:
+        _calendars_cache = calendar_service.list_calendars(service)
+    return service, _calendars_cache
+
+
+def _resolve_datetime(intent: dict) -> datetime.datetime | None:
+    """
+    Convert parsed intent date + time fields to a timezone-aware datetime.
+
+    Applies ambiguous time-of-day defaults from config.
+    """
+    from config import TIME_DEFAULTS
+
+    date_str: str | None = intent.get("date")
+    time_str: str | None = intent.get("time")
+
+    if not date_str:
+        return None
+
+    try:
+        date = datetime.date.fromisoformat(date_str)
+    except ValueError:
+        return None
+
+    if not time_str:
+        # Try to infer from original message
+        msg = (intent.get("original_message") or "").lower()
+        for keyword, default_time in TIME_DEFAULTS.items():
+            if keyword in msg:
+                time_str = default_time
+                break
+        if not time_str:
+            time_str = "09:00"  # absolute fallback
+
+    try:
+        t = datetime.time.fromisoformat(time_str)
+    except ValueError:
+        t = datetime.time(9, 0)
+
+    return datetime.datetime(date.year, date.month, date.day, t.hour, t.minute, tzinfo=TZ)
+
+
+def _format_event_line(event: dict, include_calendar: bool = True) -> str:
+    """Format a single event for display in a schedule list."""
+    time_str = event["start"].strftime("%-I:%M %p")
+    line = f"{time_str} – {event['title']}"
+    if include_calendar and event.get("calendar_name"):
+        line += f" · {event['calendar_name']}"
+    return line
+
+
+def _format_date_header(dt: datetime.datetime) -> str:
+    """Return a friendly date string like 'Monday 9 Jun 2026'."""
+    return dt.strftime("%A %-d %b %Y")
+
+
+async def _require_auth(update: Update, user_id: int) -> bool:
+    """
+    Check authentication status. If not authenticated, prompt the user and return False.
+    """
+    creds = auth.load_credentials()
+    if creds:
+        return True
+    await update.message.reply_text(
+        "You need to connect Google Calendar first.\n"
+        "Use /start to get your authorisation link."
+    )
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /start — send a Google OAuth link or confirm already authenticated.
+    """
+    user_id = update.effective_user.id
+    creds = auth.load_credentials()
+
+    if creds:
+        await update.message.reply_text(
+            "✅ You're already connected to Google Calendar!\n"
+            "Try: 'What do I have tomorrow?' or 'Add a meeting at 3pm'"
+        )
+        return
+
+    auth_url, flow = auth.get_auth_url()
+    session = session_memory.get(user_id)
+    session.pending_auth_flow = flow
+
+    await update.message.reply_text(
+        "👋 Hi! Let's connect your Google Calendar.\n\n"
+        "1. Visit this link to authorise:\n"
+        f"{auth_url}\n\n"
+        "2. Copy the code Google gives you and send it here."
+    )
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /help — display usage examples.
+    """
+    await update.message.reply_text(
+        "Here's what I can do:\n\n"
+        "📅 *Create:* 'Add a dentist appointment Friday at 10am'\n"
+        "✏️ *Edit:* 'Move my 3pm call to 5pm'\n"
+        "🗑️ *Delete:* 'Cancel my dentist on Friday'\n"
+        "👀 *View:* 'What do I have tomorrow?' or 'Show me Thursday grouped by calendar'\n"
+        "🔁 *Correct:* 'Actually make it 4pm' or 'Add it to Work instead'",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Core action handlers
+# ---------------------------------------------------------------------------
+
+async def _handle_create(
+    update: Update,
+    user_id: int,
+    intent: dict,
+    service,
+    calendars: list[dict],
+    start_dt: datetime.datetime,
+    duration_minutes: int,
+    calendar_id: str,
+    calendar_name: str,
+) -> None:
+    """Create a new calendar event, handling clash detection."""
+    clashing = clash_detector.check_clash(service, calendars, start_dt, duration_minutes)
+
+    if clashing:
+        free_slots = clash_detector.find_free_slots(
+            service, calendars, start_dt, duration_minutes
+        )
+        s = session_memory.get(user_id)
+        s.pending_clash = True
+        s.clash_slots = free_slots
+        s.clash_pending_action = "create"
+        s.pending_intent = intent
+        # Store resolved values for when user picks a slot
+        s.title = intent.get("title")
+        s.duration_minutes = duration_minutes
+        s.calendar_id = calendar_id
+        s.calendar_name = calendar_name
+        s.start_dt = start_dt
+
+        msg = clash_detector.format_clash_message(clashing, free_slots)
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await update.message.reply_text("🔍 Checking your calendar...")
+
+    event = calendar_service.create_event(
+        service, calendar_id, intent["title"], start_dt, duration_minutes
+    )
+
+    day_str = _format_date_header(start_dt)
+    time_str = start_dt.strftime("%-I:%M %p")
+    await update.message.reply_text(
+        f"✅ Event created — *{event['title']}* on {day_str} at {time_str} · {calendar_name}",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    session_memory.record_action(
+        user_id,
+        action="create",
+        title=event["title"],
+        start_dt=start_dt,
+        duration_minutes=duration_minutes,
+        calendar_id=calendar_id,
+        calendar_name=calendar_name,
+        event_id=event["id"],
+    )
+
+
+async def _handle_edit(
+    update: Update,
+    user_id: int,
+    intent: dict,
+    service,
+    calendars: list[dict],
+) -> None:
+    """Edit an existing event by title, with multi-match selection if needed."""
+    await update.message.reply_text("🔍 Checking your calendar...")
+
+    query = intent.get("title") or ""
+    date_str = intent.get("date")
+    search_date = datetime.date.fromisoformat(date_str) if date_str else None
+
+    matches = calendar_service.search_events(service, calendars, query, search_date)
+
+    if not matches:
+        await update.message.reply_text(f"❌ No event found matching '{query}'.")
+        return
+
+    if len(matches) > 1:
+        # Ask user to pick
+        s = session_memory.get(user_id)
+        s.pending_matches = matches
+        s.pending_match_action = "edit"
+        s.pending_intent = intent
+
+        lines = ["Multiple events found. Which one?\n"]
+        for i, ev in enumerate(matches, 1):
+            day = ev["start"].strftime("%a %-d %b")
+            time = ev["start"].strftime("%-I:%M %p")
+            lines.append(f"{i}. {ev['title']} — {day} at {time} · {ev.get('calendar_name', '')}")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    event = matches[0]
+    await _apply_edit(update, user_id, intent, service, calendars, event)
+
+
+async def _apply_edit(
+    update: Update,
+    user_id: int,
+    intent: dict,
+    service,
+    calendars: list[dict],
+    event: dict,
+) -> None:
+    """Apply edit to a specific resolved event."""
+    new_start = _resolve_datetime(intent)
+    new_duration = intent.get("duration_minutes")
+
+    if new_start:
+        clashing = clash_detector.check_clash(
+            service, calendars, new_start, new_duration or DEFAULT_DURATION_MINUTES,
+            exclude_event_id=event["id"]
+        )
+        if clashing:
+            free_slots = clash_detector.find_free_slots(
+                service, calendars, new_start,
+                new_duration or DEFAULT_DURATION_MINUTES,
+                exclude_event_id=event["id"],
+            )
+            s = session_memory.get(user_id)
+            s.pending_clash = True
+            s.clash_slots = free_slots
+            s.clash_pending_action = "edit"
+            s.pending_intent = intent
+            s.event_id = event["id"]
+            s.calendar_id = event["calendar_id"]
+            s.calendar_name = event.get("calendar_name", "")
+            s.title = event["title"]
+            s.duration_minutes = new_duration or DEFAULT_DURATION_MINUTES
+            s.start_dt = new_start
+
+            msg = clash_detector.format_clash_message(clashing, free_slots)
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+            return
+
+    # Determine new calendar if hint provided
+    new_calendar_id = event["calendar_id"]
+    new_calendar_name = event.get("calendar_name", "")
+    hint = intent.get("calendar_hint")
+    if hint:
+        new_calendar_id = calendar_service.find_calendar_id(calendars, hint)
+        for cal in calendars:
+            if cal["id"] == new_calendar_id:
+                new_calendar_name = cal["name"]
+                break
+
+    updated = calendar_service.update_event(
+        service,
+        new_calendar_id,
+        event["id"],
+        title=intent.get("title") or event["title"],
+        start_dt=new_start,
+        duration_minutes=new_duration,
+    )
+
+    final_start = updated["start"]
+    day_str = _format_date_header(final_start)
+    time_str = final_start.strftime("%-I:%M %p")
+    await update.message.reply_text(
+        f"📝 Updated — *{updated['title']}* now on {day_str} at {time_str} · {new_calendar_name}",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    session_memory.record_action(
+        user_id,
+        action="edit",
+        title=updated["title"],
+        start_dt=final_start,
+        duration_minutes=new_duration or DEFAULT_DURATION_MINUTES,
+        calendar_id=new_calendar_id,
+        calendar_name=new_calendar_name,
+        event_id=updated["id"],
+    )
+
+
+async def _handle_delete(
+    update: Update,
+    user_id: int,
+    intent: dict,
+    service,
+    calendars: list[dict],
+) -> None:
+    """Delete an event by title, with multi-match selection if needed."""
+    await update.message.reply_text("🔍 Checking your calendar...")
+
+    query = intent.get("title") or ""
+    date_str = intent.get("date")
+    search_date = datetime.date.fromisoformat(date_str) if date_str else None
+
+    matches = calendar_service.search_events(service, calendars, query, search_date)
+
+    if not matches:
+        await update.message.reply_text("❌ No event found matching that.")
+        return
+
+    if len(matches) > 1:
+        s = session_memory.get(user_id)
+        s.pending_matches = matches
+        s.pending_match_action = "delete"
+        s.pending_intent = intent
+
+        lines = ["Multiple events found. Which one to delete?\n"]
+        for i, ev in enumerate(matches, 1):
+            day = ev["start"].strftime("%a %-d %b")
+            time = ev["start"].strftime("%-I:%M %p")
+            lines.append(f"{i}. {ev['title']} — {day} at {time} · {ev.get('calendar_name', '')}")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    event = matches[0]
+    calendar_service.delete_event(service, event["calendar_id"], event["id"])
+    day_str = event["start"].strftime("%a %-d %b")
+    await update.message.reply_text(
+        f"🗑️ Deleted — *{event['title']}* on {day_str}",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    session_memory.clear(user_id)
+
+
+async def _handle_view(
+    update: Update,
+    user_id: int,
+    intent: dict,
+    service,
+    calendars: list[dict],
+) -> None:
+    """Display all events on the requested date."""
+    date_str = intent.get("date")
+    if not date_str:
+        date_str = datetime.date.today().isoformat()
+
+    target_date = datetime.date.fromisoformat(date_str)
+    events = calendar_service.get_events_on_day(service, calendars, target_date)
+
+    day_label = datetime.datetime(
+        target_date.year, target_date.month, target_date.day, tzinfo=TZ
+    )
+    header = _format_date_header(day_label)
+
+    if not events:
+        await update.message.reply_text(f"📅 Nothing scheduled on {header}.")
+        return
+
+    msg_lower = (intent.get("original_message") or "").lower()
+    group_by_calendar = "group" in msg_lower and "calendar" in msg_lower
+
+    lines = [f"📅 *{header}*\n"]
+
+    if group_by_calendar:
+        grouped: dict[str, list[dict]] = {}
+        for ev in events:
+            cal_name = ev.get("calendar_name", "Other")
+            grouped.setdefault(cal_name, []).append(ev)
+        for cal_name, cal_events in grouped.items():
+            lines.append(f"*{cal_name}*")
+            for ev in cal_events:
+                lines.append(_format_event_line(ev, include_calendar=False))
+            lines.append("")
+    else:
+        for ev in events:
+            lines.append(_format_event_line(ev))
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def _handle_correct(
+    update: Update,
+    user_id: int,
+    intent: dict,
+    service,
+    calendars: list[dict],
+) -> None:
+    """
+    Apply a correction to the last action.
+
+    Merges the correction intent over the last session state and re-executes.
+    """
+    s = session_memory.get(user_id)
+    if not s.action or not s.event_id:
+        await update.message.reply_text(
+            "I don't have a recent action to correct. Please describe what you'd like to change."
+        )
+        return
+
+    # Build merged intent from session + correction
+    merged = {
+        "action": "edit",
+        "title": intent.get("title") or s.title,
+        "date": intent.get("date") or (s.date.isoformat() if s.date else None),
+        "time": intent.get("time"),
+        "duration_minutes": intent.get("duration_minutes") or s.duration_minutes,
+        "calendar_hint": intent.get("calendar_hint"),
+        "is_correction": True,
+        "original_message": intent.get("original_message", ""),
+    }
+
+    event_stub = {
+        "id": s.event_id,
+        "title": s.title,
+        "start": s.start_dt,
+        "end": (
+            (s.start_dt + datetime.timedelta(minutes=s.duration_minutes))
+            if s.start_dt and s.duration_minutes
+            else None
+        ),
+        "calendar_id": s.calendar_id,
+        "calendar_name": s.calendar_name,
+    }
+    await _apply_edit(update, user_id, merged, service, calendars, event_stub)
+
+
+# ---------------------------------------------------------------------------
+# Clash / multi-match resolution
+# ---------------------------------------------------------------------------
+
+async def _resolve_clash_pick(
+    update: Update,
+    user_id: int,
+    choice: int,
+    service,
+    calendars: list[dict],
+) -> None:
+    """Handle 1/2/3 slot selection after a clash warning."""
+    s = session_memory.get(user_id)
+    slots = s.clash_slots
+
+    if choice < 1 or choice > len(slots):
+        await update.message.reply_text(
+            f"Please reply with a number between 1 and {len(slots)}."
+        )
+        return
+
+    chosen_start = slots[choice - 1]
+    duration = s.duration_minutes or DEFAULT_DURATION_MINUTES
+
+    if s.clash_pending_action == "create":
+        event = calendar_service.create_event(
+            service, s.calendar_id, s.title, chosen_start, duration
+        )
+        day_str = _format_date_header(chosen_start)
+        time_str = chosen_start.strftime("%-I:%M %p")
+        await update.message.reply_text(
+            f"✅ Event created — *{event['title']}* on {day_str} at {time_str} · {s.calendar_name}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        session_memory.record_action(
+            user_id,
+            action="create",
+            title=event["title"],
+            start_dt=chosen_start,
+            duration_minutes=duration,
+            calendar_id=s.calendar_id,
+            calendar_name=s.calendar_name,
+            event_id=event["id"],
+        )
+
+    elif s.clash_pending_action == "edit":
+        updated = calendar_service.update_event(
+            service, s.calendar_id, s.event_id, start_dt=chosen_start, duration_minutes=duration
+        )
+        day_str = _format_date_header(chosen_start)
+        time_str = chosen_start.strftime("%-I:%M %p")
+        await update.message.reply_text(
+            f"📝 Updated — *{updated['title']}* now on {day_str} at {time_str} · {s.calendar_name}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        session_memory.record_action(
+            user_id,
+            action="edit",
+            title=updated["title"],
+            start_dt=chosen_start,
+            duration_minutes=duration,
+            calendar_id=s.calendar_id,
+            calendar_name=s.calendar_name,
+            event_id=updated["id"],
+        )
+    else:
+        s.pending_clash = False
+
+
+async def _resolve_match_pick(
+    update: Update,
+    user_id: int,
+    choice: int,
+    service,
+    calendars: list[dict],
+) -> None:
+    """Handle numbered selection after multiple event matches."""
+    s = session_memory.get(user_id)
+    matches = s.pending_matches
+
+    if choice < 1 or choice > len(matches):
+        await update.message.reply_text(
+            f"Please reply with a number between 1 and {len(matches)}."
+        )
+        return
+
+    event = matches[choice - 1]
+    action = s.pending_match_action
+    intent = s.pending_intent or {}
+
+    # Clear pending state
+    s.pending_matches = []
+    s.pending_match_action = None
+    s.pending_intent = None
+
+    if action == "edit":
+        await _apply_edit(update, user_id, intent, service, calendars, event)
+    elif action == "delete":
+        calendar_service.delete_event(service, event["calendar_id"], event["id"])
+        day_str = event["start"].strftime("%a %-d %b")
+        await update.message.reply_text(
+            f"🗑️ Deleted — *{event['title']}* on {day_str}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        session_memory.clear(user_id)
+
+
+# ---------------------------------------------------------------------------
+# Main message handler
+# ---------------------------------------------------------------------------
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Route all non-command text messages."""
+    user_id = update.effective_user.id
+    text = (update.message.text or "").strip()
+
+    session = session_memory.get(user_id)
+    session_memory.touch(user_id)
+
+    # --- OAuth code exchange ---
+    if session.pending_auth_flow is not None:
+        try:
+            auth.exchange_code(session.pending_auth_flow, text)
+            session.pending_auth_flow = None
+            # Pre-load calendars
+            global _calendars_cache
+            creds = auth.load_credentials()
+            svc = calendar_service.build_service(creds)
+            _calendars_cache = calendar_service.list_calendars(svc)
+            cal_names = ", ".join(c["name"] for c in _calendars_cache)
+            await update.message.reply_text(
+                f"✅ Connected! Found {len(_calendars_cache)} calendar(s): {cal_names}\n\n"
+                "Try: 'What do I have tomorrow?' or 'Add a meeting at 3pm'"
+            )
+        except Exception as exc:
+            logger.error("OAuth exchange failed: %s", exc)
+            await update.message.reply_text(
+                "❌ That code didn't work. Use /start to try again."
+            )
+        return
+
+    # --- Require auth for everything else ---
+    if not await _require_auth(update, user_id):
+        return
+
+    service, calendars = _get_service_and_calendars()
+    if service is None:
+        await update.message.reply_text("Google Calendar isn't connected. Use /start.")
+        return
+
+    # --- Pending clash slot pick (1/2/3 or 'keep original') ---
+    if session.pending_clash:
+        text_lower = text.lower().strip()
+        if text_lower in ("keep original", "keep"):
+            # Override — create/edit at original time
+            session.pending_clash = False
+            duration = session.duration_minutes or DEFAULT_DURATION_MINUTES
+            if session.clash_pending_action == "create":
+                event = calendar_service.create_event(
+                    service, session.calendar_id, session.title,
+                    session.start_dt, duration
+                )
+                day_str = _format_date_header(session.start_dt)
+                time_str = session.start_dt.strftime("%-I:%M %p")
+                await update.message.reply_text(
+                    f"✅ Event created — *{event['title']}* on {day_str} at {time_str} · {session.calendar_name}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                session_memory.record_action(
+                    user_id, action="create", title=event["title"],
+                    start_dt=session.start_dt, duration_minutes=duration,
+                    calendar_id=session.calendar_id, calendar_name=session.calendar_name,
+                    event_id=event["id"],
+                )
+            return
+
+        if text.strip().isdigit():
+            await _resolve_clash_pick(update, user_id, int(text.strip()), service, calendars)
+            return
+
+    # --- Pending multi-match selection ---
+    if session.pending_matches and text.strip().isdigit():
+        await _resolve_match_pick(update, user_id, int(text.strip()), service, calendars)
+        return
+
+    # --- NLP intent parsing ---
+    calendar_names = [c["name"] for c in calendars]
+    today_str = datetime.date.today().isoformat()
+    last_action_ctx = session_memory.to_context_dict(user_id)
+
+    intent = intent_parser.parse_intent(text, calendar_names, last_action_ctx, today_str)
+    action = intent.get("action", "unknown")
+
+    if action == "unknown":
+        await update.message.reply_text(UNKNOWN_REPLY)
+        return
+
+    # --- Dispatch ---
+    if action in ("create",):
+        start_dt = _resolve_datetime(intent)
+        if not start_dt:
+            await update.message.reply_text(
+                "I need a date and time. Try: 'Add a meeting *tomorrow at 3pm*'"
+            )
+            return
+
+        duration = intent.get("duration_minutes") or DEFAULT_DURATION_MINUTES
+        hint = intent.get("calendar_hint")
+        calendar_id = calendar_service.find_calendar_id(calendars, hint)
+        calendar_name = next(
+            (c["name"] for c in calendars if c["id"] == calendar_id), "Primary"
+        )
+        title = intent.get("title") or "New Event"
+        intent["title"] = title
+
+        await _handle_create(
+            update, user_id, intent, service, calendars,
+            start_dt, duration, calendar_id, calendar_name,
+        )
+
+    elif action == "edit":
+        await _handle_edit(update, user_id, intent, service, calendars)
+
+    elif action == "delete":
+        await _handle_delete(update, user_id, intent, service, calendars)
+
+    elif action == "view":
+        await _handle_view(update, user_id, intent, service, calendars)
+
+    elif action == "correct":
+        await _handle_correct(update, user_id, intent, service, calendars)
+
+    else:
+        await update.message.reply_text(UNKNOWN_REPLY)
+
+
+# ---------------------------------------------------------------------------
+# App bootstrap
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Build and run the Telegram bot (polling mode)."""
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .build()
+    )
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    logger.info("Bot started — polling for updates...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
