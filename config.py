@@ -24,6 +24,13 @@ TIME_DEFAULTS = {
     "night": "21:00",
 }
 
+# Calendars to exclude from clash detection (noise/shared calendars)
+CLASH_EXCLUDED_CALENDARS = {
+    "pfgroadshow@gmail.com",
+    "sc direct group",
+    "team meeting",
+}
+
 # Session expiry
 SESSION_TIMEOUT_MINUTES = 30
 

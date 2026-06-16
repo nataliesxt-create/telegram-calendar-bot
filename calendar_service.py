@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from config import DEFAULT_CALENDAR, LOOKAHEAD_DAYS, TIMEZONE, TZ
+from config import CLASH_EXCLUDED_CALENDARS, DEFAULT_CALENDAR, LOOKAHEAD_DAYS, TIMEZONE, TZ
 
 # Google Calendar color IDs
 COLOR_GREEN = "2"   # Sage → confirmed appointment
@@ -249,10 +249,12 @@ def get_events_in_range(
     """
     Return all events across all calendars within [start_dt, end_dt].
 
-    Used by clash_detector.
+    Excludes calendars listed in CLASH_EXCLUDED_CALENDARS. Used by clash_detector.
     """
     events: list[dict] = []
     for cal in calendars:
+        if cal["name"].lower() in CLASH_EXCLUDED_CALENDARS or cal["id"].lower() in CLASH_EXCLUDED_CALENDARS:
+            continue
         result = (
             service.events()
             .list(
