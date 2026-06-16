@@ -208,87 +208,68 @@ async def _handle_book_appointment(
 
     await update.message.reply_text("🔍 Checking your Appointments calendar...")
 
-    # If specific time given, look for placeholder at that exact slot
-    if date_str and time_str:
-        target_dt = _resolve_datetime(intent)
-        on_date = target_dt.date() if target_dt else None
-        placeholders = calendar_service.find_placeholder_slots(service, appt_cal, on_date=on_date)
+    target_dt = _resolve_datetime(intent) if (date_str and time_str) else None
+    on_date = target_dt.date() if target_dt else (datetime.date.fromisoformat(date_str) if date_str else None)
 
-        # Find the closest placeholder to the requested time
-        matching = None
-        if target_dt:
-            for p in placeholders:
-                if abs((p["start"] - target_dt).total_seconds()) < 3600:  # within 1hr
-                    matching = p
-                    break
+    # Find overlapping placeholder on that date (to delete it after booking)
+    placeholders = calendar_service.find_placeholder_slots(service, appt_cal, on_date=on_date)
 
-        if matching:
-            await _propose_appointment(update, user_id, matching, client_name, appt_cal, service)
-        else:
-            # No placeholder — just create a new confirmed event
-            if target_dt:
-                event = calendar_service.create_event(
-                    service, appt_cal["id"],
-                    f"Appointment: {client_name}",
-                    target_dt,
-                    calendar_service.APPOINTMENT_DURATION_MINUTES,
-                    color_id=calendar_service.COLOR_GREEN,
-                )
-                day_str = _format_date_header(target_dt)
-                end_dt = target_dt + datetime.timedelta(minutes=calendar_service.APPOINTMENT_DURATION_MINUTES)
-                await update.message.reply_text(
-                    f"✅ Booked — *Appointment: {client_name}* on {day_str} "
-                    f"at {target_dt.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')} · Appointments",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                session_memory.record_action(
-                    user_id, action="create", title=f"Appointment: {client_name}",
-                    start_dt=target_dt,
-                    duration_minutes=calendar_service.APPOINTMENT_DURATION_MINUTES,
-                    calendar_id=appt_cal["id"], calendar_name=appt_cal["name"],
-                    event_id=event["id"],
-                )
+    if target_dt:
+        # User specified a time — book at their time, find any overlapping placeholder to clean up
+        end_dt = target_dt + datetime.timedelta(minutes=calendar_service.APPOINTMENT_DURATION_MINUTES)
+        overlapping_placeholder = None
+        for p in placeholders:
+            if p["start"] < end_dt and p["end"] > target_dt:
+                overlapping_placeholder = p
+                break
+
+        await _propose_appointment(
+            update, user_id, client_name, appt_cal,
+            book_at=target_dt,
+            placeholder_to_delete=overlapping_placeholder,
+        )
     else:
-        # No time specified — find next available placeholder
-        on_date = datetime.date.fromisoformat(date_str) if date_str else None
-        placeholders = calendar_service.find_placeholder_slots(service, appt_cal, on_date=on_date)
-
+        # No time — propose the next available placeholder's time
         if not placeholders:
             msg = "No available appointment slots found"
             msg += f" on {on_date.strftime('%a %-d %b')}" if on_date else " coming up"
             await update.message.reply_text(f"❌ {msg}. Add a red 'Appointment:' block to your calendar first.")
             return
 
-        await _propose_appointment(update, user_id, placeholders[0], client_name, appt_cal, service)
+        p = placeholders[0]
+        await _propose_appointment(
+            update, user_id, client_name, appt_cal,
+            book_at=p["start"],
+            placeholder_to_delete=p,
+        )
 
 
 async def _propose_appointment(
     update: Update,
     user_id: int,
-    placeholder: dict,
     client_name: str,
     appt_cal: dict,
-    service,
+    book_at: datetime.datetime,
+    placeholder_to_delete: dict | None,
 ) -> None:
-    """Send a confirmation prompt for booking into a specific placeholder slot."""
-    start = placeholder["start"]
-    end_dt = start + datetime.timedelta(minutes=calendar_service.APPOINTMENT_DURATION_MINUTES)
-    day_str = _format_date_header(start)
-    time_str = f"{start.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')}"
+    """Send a confirmation prompt before booking an appointment."""
+    end_dt = book_at + datetime.timedelta(minutes=calendar_service.APPOINTMENT_DURATION_MINUTES)
+    day_str = _format_date_header(book_at)
+    time_str = f"{book_at.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')}"
 
-    s = session_memory.get(update.effective_user.id)
+    s = session_memory.get(user_id)
     s.pending_appointment_booking = {
-        "placeholder_id": placeholder["id"],
+        "placeholder_id": placeholder_to_delete["id"] if placeholder_to_delete else None,
         "client_name": client_name,
-        "start_dt": start,
+        "start_dt": book_at,
         "appt_cal_id": appt_cal["id"],
         "appt_cal_name": appt_cal["name"],
     }
 
     await update.message.reply_text(
-        f"📅 Available slot: *{day_str}* at {time_str}\n\n"
+        f"📅 *{day_str}* at {time_str}\n\n"
         f"Book *Appointment: {client_name}* here?\n"
-        f"Reply *yes* to confirm or *no* to see other slots.",
+        f"Reply *yes* to confirm or *no* to cancel.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -829,40 +810,41 @@ async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text
         if text_lower in ("yes", "y", "yeah", "yep", "ok", "okay", "confirm", "book it", "go ahead"):
             session.pending_appointment_booking = None
             appt_cal = calendar_service.find_appointments_calendar(calendars)
-            updated = calendar_service.book_appointment_slot(
-                service, appt_cal,
-                booking["placeholder_id"],
-                booking["client_name"],
-                booking["start_dt"],
+            start_dt = booking["start_dt"]
+            duration = calendar_service.APPOINTMENT_DURATION_MINUTES
+
+            # Delete overlapping placeholder if there is one
+            if booking.get("placeholder_id"):
+                try:
+                    calendar_service.delete_event(service, appt_cal["id"], booking["placeholder_id"])
+                except Exception:
+                    pass  # already deleted or moved, continue anyway
+
+            # Create the confirmed green appointment at the requested time
+            event = calendar_service.create_event(
+                service, appt_cal["id"],
+                f"Appointment: {booking['client_name']}",
+                start_dt, duration,
+                color_id=calendar_service.COLOR_GREEN,
             )
-            start = updated["start"]
-            end_dt = start + datetime.timedelta(minutes=calendar_service.APPOINTMENT_DURATION_MINUTES)
-            day_str = _format_date_header(start)
+            end_dt = start_dt + datetime.timedelta(minutes=duration)
+            day_str = _format_date_header(start_dt)
             await update.message.reply_text(
                 f"✅ Booked — *Appointment: {booking['client_name']}* on {day_str} "
-                f"at {start.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')} · Appointments 🟢",
+                f"at {start_dt.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')} · Appointments 🟢",
                 parse_mode=ParseMode.MARKDOWN,
             )
             session_memory.record_action(
-                user_id, action="create", title=updated["title"],
-                start_dt=start,
-                duration_minutes=calendar_service.APPOINTMENT_DURATION_MINUTES,
+                user_id, action="create", title=event["title"],
+                start_dt=start_dt, duration_minutes=duration,
                 calendar_id=appt_cal["id"], calendar_name=appt_cal["name"],
-                event_id=updated["id"],
+                event_id=event["id"],
             )
             return
 
-        elif text_lower in ("no", "n", "nope", "other", "next", "other slots"):
-            # Show next available slots
-            appt_cal = calendar_service.find_appointments_calendar(calendars)
-            placeholders = calendar_service.find_placeholder_slots(service, appt_cal, limit=4)
-            # Skip the one already proposed
-            placeholders = [p for p in placeholders if p["id"] != booking["placeholder_id"]]
-            if not placeholders:
-                session.pending_appointment_booking = None
-                await update.message.reply_text("No other available slots found.")
-                return
-            await _propose_appointment(update, user_id, placeholders[0], booking["client_name"], appt_cal, service)
+        elif text_lower in ("no", "n", "nope", "cancel"):
+            session.pending_appointment_booking = None
+            await update.message.reply_text("Cancelled. Let me know when you'd like to book.")
             return
 
     # --- NLP intent parsing ---
