@@ -20,13 +20,16 @@ from telegram.ext import (
     filters,
 )
 
+import io
+import tempfile
+
 import auth
 import calendar_service
 import clash_detector
 import intent_parser
 import session_memory as sm_module
-from config import DEFAULT_DURATION_MINUTES, TELEGRAM_TOKEN, TIMEZONE, TZ
-from intent_parser import UNKNOWN_REPLY
+from config import DEFAULT_DURATION_MINUTES, OPENAI_API_KEY, TELEGRAM_TOKEN, TIMEZONE, TZ
+from intent_parser import UNKNOWN_REPLY, _client as openai_client
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -926,6 +929,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ---------------------------------------------------------------------------
+# Voice note handler
+# ---------------------------------------------------------------------------
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Transcribe a Telegram voice note via OpenAI Whisper, then route it
+    through the same handle_message flow as a text message.
+    """
+    await update.message.reply_text("🎙️ Transcribing...")
+
+    voice = update.message.voice or update.message.audio
+    tg_file = await context.bot.get_file(voice.file_id)
+
+    # Download to a temp file with .ogg extension so Whisper recognises the format
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        await tg_file.download_to_drive(tmp.name)
+        tmp_path = tmp.name
+
+    try:
+        with open(tmp_path, "rb") as audio_file:
+            transcript = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+            )
+        text = transcript.text.strip()
+        if not text:
+            await update.message.reply_text("I couldn't make out what you said. Try again?")
+            return
+
+        logger.info("Voice transcribed: %s", text)
+        await update.message.reply_text(f'🎙️ _"{text}"_', parse_mode=ParseMode.MARKDOWN)
+
+        # Inject the transcribed text as a fake text message and reuse handle_message
+        update.message.text = text
+        await handle_message(update, context)
+
+    except Exception as exc:
+        logger.error("Voice transcription failed: %s", exc)
+        await update.message.reply_text("❌ Couldn't transcribe that. Please try again or type it.")
+    finally:
+        import os
+        os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # App bootstrap
 # ---------------------------------------------------------------------------
 
@@ -940,6 +988,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
     logger.info("Bot started — polling for updates...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
