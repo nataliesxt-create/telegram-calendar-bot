@@ -140,28 +140,34 @@ def _push_to_railway(token_data: str) -> None:
         return
 
     query = """
-    mutation upsertVariables($input: VariableCollectionUpsertInput!) {
-      variableCollectionUpsert(input: $input)
+    mutation($serviceId: String!, $environmentId: String!, $variables: ServiceVariables!) {
+      variableCollectionUpsert(
+        serviceId: $serviceId
+        environmentId: $environmentId
+        variables: $variables
+      )
     }
     """
     variables = {
-        "input": {
-            "serviceId": service_id,
-            "environmentId": environment_id,
-            "variables": {"GOOGLE_TOKEN_JSON": token_data},
-        }
+        "serviceId": service_id,
+        "environmentId": environment_id,
+        "variables": {"GOOGLE_TOKEN_JSON": token_data},
     }
 
     try:
         resp = httpx.post(
             "https://backboard.railway.com/graphql/v2",
             json={"query": query, "variables": variables},
-            headers={"Authorization": f"Bearer {api_token}"},
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/json",
+            },
             timeout=10,
         )
-        if resp.status_code == 200 and "errors" not in resp.json():
+        body = resp.json()
+        if resp.status_code == 200 and "errors" not in body:
             logger.info("Google token persisted to Railway env var successfully.")
         else:
-            logger.error("Railway API returned error: %s", resp.text)
+            logger.error("Railway API error: %s", resp.text)
     except Exception as exc:
         logger.error("Failed to persist token to Railway: %s", exc)
