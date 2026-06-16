@@ -127,12 +127,17 @@ def _save_token(creds: Credentials) -> None:
 
 def _push_to_railway(token_data: str) -> None:
     """Update GOOGLE_TOKEN_JSON env var on Railway via their API."""
+    import logging
+    logger = logging.getLogger(__name__)
+
     api_token = os.environ.get("RAILWAY_API_TOKEN")
     service_id = os.environ.get("RAILWAY_SERVICE_ID")
     environment_id = os.environ.get("RAILWAY_ENVIRONMENT_ID")
 
     if not all([api_token, service_id, environment_id]):
-        return  # Running locally without Railway context
+        logger.warning("Railway env vars missing — token not persisted. API_TOKEN=%s SERVICE_ID=%s ENV_ID=%s",
+                       bool(api_token), bool(service_id), bool(environment_id))
+        return
 
     query = """
     mutation upsertVariables($input: VariableCollectionUpsertInput!) {
@@ -148,11 +153,15 @@ def _push_to_railway(token_data: str) -> None:
     }
 
     try:
-        httpx.post(
+        resp = httpx.post(
             "https://backboard.railway.com/graphql/v2",
             json={"query": query, "variables": variables},
             headers={"Authorization": f"Bearer {api_token}"},
             timeout=10,
         )
-    except Exception:
-        pass
+        if resp.status_code == 200 and "errors" not in resp.json():
+            logger.info("Google token persisted to Railway env var successfully.")
+        else:
+            logger.error("Railway API returned error: %s", resp.text)
+    except Exception as exc:
+        logger.error("Failed to persist token to Railway: %s", exc)
