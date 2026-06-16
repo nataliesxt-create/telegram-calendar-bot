@@ -15,6 +15,14 @@ from googleapiclient.discovery import build
 
 from config import DEFAULT_CALENDAR, LOOKAHEAD_DAYS, TIMEZONE, TZ
 
+# Google Calendar color IDs
+COLOR_GREEN = "2"   # Sage → confirmed appointment
+COLOR_RED   = "11"  # Tomato → placeholder block
+
+APPOINTMENT_PLACEHOLDER_PREFIX = "Appointment:"
+APPOINTMENTS_CALENDAR_NAME = "Appointments"
+APPOINTMENT_DURATION_MINUTES = 90
+
 
 # ---------------------------------------------------------------------------
 # Service factory
@@ -79,6 +87,7 @@ def create_event(
     title: str,
     start_dt: datetime.datetime,
     duration_minutes: int,
+    color_id: str | None = None,
 ) -> dict:
     """
     Create a calendar event and return the created event dict.
@@ -91,6 +100,8 @@ def create_event(
         "start": {"dateTime": start_dt.isoformat(), "timeZone": TIMEZONE},
         "end": {"dateTime": end_dt.isoformat(), "timeZone": TIMEZONE},
     }
+    if color_id:
+        body["colorId"] = color_id
     event = service.events().insert(calendarId=calendar_id, body=body).execute()
     return _normalise(event, calendar_id)
 
@@ -103,6 +114,7 @@ def update_event(
     title: str | None = None,
     start_dt: datetime.datetime | None = None,
     duration_minutes: int | None = None,
+    color_id: str | None = None,
 ) -> dict:
     """
     Patch an existing event.  Only the supplied kwargs are changed.
@@ -114,6 +126,9 @@ def update_event(
 
     if title:
         patch["summary"] = title
+
+    if color_id:
+        patch["colorId"] = color_id
 
     if start_dt:
         if duration_minutes is None:
@@ -256,6 +271,119 @@ def get_events_in_range(
 
     events.sort(key=lambda e: e["start"])
     return events
+
+
+# ---------------------------------------------------------------------------
+# Appointments calendar helpers
+# ---------------------------------------------------------------------------
+
+def find_appointments_calendar(calendars: list[dict]) -> dict | None:
+    """Return the Appointments calendar dict, or None if not found."""
+    for cal in calendars:
+        if APPOINTMENTS_CALENDAR_NAME.lower() in cal["name"].lower():
+            return cal
+    return None
+
+
+def find_placeholder_slots(
+    service,
+    appointments_cal: dict,
+    on_date: datetime.date | None = None,
+    limit: int = 5,
+) -> list[dict]:
+    """
+    Find upcoming red placeholder blocks in the Appointments calendar.
+
+    These are events whose title starts with 'Appointment:' and have
+    colorId == COLOR_RED (11 / Tomato), or no specific color set (inherits
+    calendar color which may be red).
+
+    Args:
+        service:          Google Calendar API service.
+        appointments_cal: The Appointments calendar dict.
+        on_date:          If provided, only look on this date.
+        limit:            Max number of placeholders to return.
+
+    Returns:
+        List of normalised event dicts, sorted by start time.
+    """
+    now = datetime.datetime.now(tz=TZ)
+
+    if on_date:
+        time_min = datetime.datetime(on_date.year, on_date.month, on_date.day, tzinfo=TZ)
+        time_max = time_min + datetime.timedelta(days=1)
+    else:
+        time_min = now
+        time_max = now + datetime.timedelta(days=LOOKAHEAD_DAYS)
+
+    result = (
+        service.events()
+        .list(
+            calendarId=appointments_cal["id"],
+            q=APPOINTMENT_PLACEHOLDER_PREFIX,
+            timeMin=time_min.isoformat(),
+            timeMax=time_max.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=limit * 3,  # fetch extra to filter
+        )
+        .execute()
+    )
+
+    placeholders = []
+    for ev in result.get("items", []):
+        title = ev.get("summary", "")
+        # Must start with "Appointment:" prefix
+        if not title.strip().startswith(APPOINTMENT_PLACEHOLDER_PREFIX):
+            continue
+        # Must still be a placeholder (red color or no override color = calendar default)
+        color = ev.get("colorId", COLOR_RED)
+        if color == COLOR_GREEN:
+            continue  # already booked
+        norm = _normalise(ev, appointments_cal["id"])
+        norm["calendar_name"] = appointments_cal["name"]
+        placeholders.append(norm)
+        if len(placeholders) >= limit:
+            break
+
+    return placeholders
+
+
+def book_appointment_slot(
+    service,
+    appointments_cal: dict,
+    placeholder_event_id: str,
+    client_name: str,
+    start_dt: datetime.datetime,
+    duration_minutes: int = APPOINTMENT_DURATION_MINUTES,
+) -> dict:
+    """
+    Replace a red placeholder block with a confirmed appointment.
+
+    Renames the event to 'Appointment: [client_name]', sets duration to
+    duration_minutes, and changes color to green.
+
+    Returns: updated normalised event dict.
+    """
+    end_dt = start_dt + datetime.timedelta(minutes=duration_minutes)
+    patch = {
+        "summary": f"Appointment: {client_name}",
+        "start": {"dateTime": start_dt.isoformat(), "timeZone": TIMEZONE},
+        "end": {"dateTime": end_dt.isoformat(), "timeZone": TIMEZONE},
+        "colorId": COLOR_GREEN,
+    }
+    updated = (
+        service.events()
+        .patch(
+            calendarId=appointments_cal["id"],
+            eventId=placeholder_event_id,
+            body=patch,
+        )
+        .execute()
+    )
+    norm = _normalise(updated, appointments_cal["id"])
+    norm["calendar_name"] = appointments_cal["name"]
+    return norm
 
 
 # ---------------------------------------------------------------------------

@@ -174,6 +174,123 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Appointments calendar booking flow
+# ---------------------------------------------------------------------------
+
+async def _handle_book_appointment(
+    update: Update,
+    user_id: int,
+    intent: dict,
+    service,
+    calendars: list[dict],
+) -> None:
+    """
+    Book a client/personal appointment into the Appointments calendar.
+
+    Flow:
+    - If date+time given: find placeholder at that slot → confirm with user
+    - If no time given: find next available red placeholder → propose it
+    - On user confirmation (yes/y): replace placeholder with confirmed event (green)
+    """
+    appt_cal = calendar_service.find_appointments_calendar(calendars)
+    if not appt_cal:
+        await update.message.reply_text(
+            "❌ I couldn't find an 'Appointments' calendar. Please create one in Google Calendar first."
+        )
+        return
+
+    client_name = intent.get("title") or "Appointment"
+    date_str = intent.get("date")
+    time_str = intent.get("time")
+
+    await update.message.reply_text("🔍 Checking your Appointments calendar...")
+
+    # If specific time given, look for placeholder at that exact slot
+    if date_str and time_str:
+        target_dt = _resolve_datetime(intent)
+        on_date = target_dt.date() if target_dt else None
+        placeholders = calendar_service.find_placeholder_slots(service, appt_cal, on_date=on_date)
+
+        # Find the closest placeholder to the requested time
+        matching = None
+        if target_dt:
+            for p in placeholders:
+                if abs((p["start"] - target_dt).total_seconds()) < 3600:  # within 1hr
+                    matching = p
+                    break
+
+        if matching:
+            await _propose_appointment(update, user_id, matching, client_name, appt_cal, service)
+        else:
+            # No placeholder — just create a new confirmed event
+            if target_dt:
+                event = calendar_service.create_event(
+                    service, appt_cal["id"],
+                    f"Appointment: {client_name}",
+                    target_dt,
+                    calendar_service.APPOINTMENT_DURATION_MINUTES,
+                    color_id=calendar_service.COLOR_GREEN,
+                )
+                day_str = _format_date_header(target_dt)
+                end_dt = target_dt + datetime.timedelta(minutes=calendar_service.APPOINTMENT_DURATION_MINUTES)
+                await update.message.reply_text(
+                    f"✅ Booked — *Appointment: {client_name}* on {day_str} "
+                    f"at {target_dt.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')} · Appointments",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                session_memory.record_action(
+                    user_id, action="create", title=f"Appointment: {client_name}",
+                    start_dt=target_dt,
+                    duration_minutes=calendar_service.APPOINTMENT_DURATION_MINUTES,
+                    calendar_id=appt_cal["id"], calendar_name=appt_cal["name"],
+                    event_id=event["id"],
+                )
+    else:
+        # No time specified — find next available placeholder
+        on_date = datetime.date.fromisoformat(date_str) if date_str else None
+        placeholders = calendar_service.find_placeholder_slots(service, appt_cal, on_date=on_date)
+
+        if not placeholders:
+            msg = "No available appointment slots found"
+            msg += f" on {on_date.strftime('%a %-d %b')}" if on_date else " coming up"
+            await update.message.reply_text(f"❌ {msg}. Add a red 'Appointment:' block to your calendar first.")
+            return
+
+        await _propose_appointment(update, user_id, placeholders[0], client_name, appt_cal, service)
+
+
+async def _propose_appointment(
+    update: Update,
+    user_id: int,
+    placeholder: dict,
+    client_name: str,
+    appt_cal: dict,
+    service,
+) -> None:
+    """Send a confirmation prompt for booking into a specific placeholder slot."""
+    start = placeholder["start"]
+    end_dt = start + datetime.timedelta(minutes=calendar_service.APPOINTMENT_DURATION_MINUTES)
+    day_str = _format_date_header(start)
+    time_str = f"{start.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')}"
+
+    s = session_memory.get(update.effective_user.id)
+    s.pending_appointment_booking = {
+        "placeholder_id": placeholder["id"],
+        "client_name": client_name,
+        "start_dt": start,
+        "appt_cal_id": appt_cal["id"],
+        "appt_cal_name": appt_cal["name"],
+    }
+
+    await update.message.reply_text(
+        f"📅 Available slot: *{day_str}* at {time_str}\n\n"
+        f"Book *Appointment: {client_name}* here?\n"
+        f"Reply *yes* to confirm or *no* to see other slots.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Core action handlers
 # ---------------------------------------------------------------------------
 
@@ -673,6 +790,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _resolve_match_pick(update, user_id, int(text.strip()), service, calendars)
         return
 
+    # --- Pending appointment booking confirmation (yes/no) ---
+    if session.pending_appointment_booking:
+        text_lower = text.lower().strip()
+        booking = session.pending_appointment_booking
+
+        if text_lower in ("yes", "y", "yeah", "yep", "ok", "okay", "confirm", "book it", "go ahead"):
+            session.pending_appointment_booking = None
+            appt_cal = calendar_service.find_appointments_calendar(calendars)
+            updated = calendar_service.book_appointment_slot(
+                service, appt_cal,
+                booking["placeholder_id"],
+                booking["client_name"],
+                booking["start_dt"],
+            )
+            start = updated["start"]
+            end_dt = start + datetime.timedelta(minutes=calendar_service.APPOINTMENT_DURATION_MINUTES)
+            day_str = _format_date_header(start)
+            await update.message.reply_text(
+                f"✅ Booked — *Appointment: {booking['client_name']}* on {day_str} "
+                f"at {start.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')} · Appointments 🟢",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            session_memory.record_action(
+                user_id, action="create", title=updated["title"],
+                start_dt=start,
+                duration_minutes=calendar_service.APPOINTMENT_DURATION_MINUTES,
+                calendar_id=appt_cal["id"], calendar_name=appt_cal["name"],
+                event_id=updated["id"],
+            )
+            return
+
+        elif text_lower in ("no", "n", "nope", "other", "next", "other slots"):
+            # Show next available slots
+            appt_cal = calendar_service.find_appointments_calendar(calendars)
+            placeholders = calendar_service.find_placeholder_slots(service, appt_cal, limit=4)
+            # Skip the one already proposed
+            placeholders = [p for p in placeholders if p["id"] != booking["placeholder_id"]]
+            if not placeholders:
+                session.pending_appointment_booking = None
+                await update.message.reply_text("No other available slots found.")
+                return
+            await _propose_appointment(update, user_id, placeholders[0], booking["client_name"], appt_cal, service)
+            return
+
     # --- NLP intent parsing ---
     calendar_names = [c["name"] for c in calendars]
     today_str = datetime.date.today().isoformat()
@@ -707,6 +868,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update, user_id, intent, service, calendars,
             start_dt, duration, calendar_id, calendar_name,
         )
+
+    elif action == "book_appointment":
+        await _handle_book_appointment(update, user_id, intent, service, calendars)
 
     elif action == "edit":
         await _handle_edit(update, user_id, intent, service, calendars)

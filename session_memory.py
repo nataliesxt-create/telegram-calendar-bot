@@ -39,6 +39,9 @@ class SessionState:
     pending_match_action: str | None = None  # "edit" or "delete"
     pending_intent: dict | None = None  # original intent for edit/delete
 
+    # Pending appointment booking confirmation
+    pending_appointment_booking: dict | None = None  # {placeholder_id, client_name, start_dt, appt_cal_id, appt_cal_name}
+
     # Auth flow
     pending_auth_flow: object = None  # holds the Flow object during OAuth
 

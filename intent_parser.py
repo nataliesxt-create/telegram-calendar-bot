@@ -34,7 +34,7 @@ You will be given:
 
 Return ONLY valid JSON matching this schema exactly:
 {
-  "action": "create | edit | delete | view | correct | unknown",
+  "action": "create | book_appointment | edit | delete | view | correct | unknown",
   "title": "string or null",
   "date": "YYYY-MM-DD or null",
   "time": "HH:MM in 24h format or null",
@@ -65,9 +65,13 @@ Rules:
   (e.g. "actually make it 4pm", "add it to Work instead").
 - action "view": for queries about what's scheduled ("what's on", "show me", "do I
   have anything").
-- action "create": use when the user mentions any appointment, event, or activity with
-  a date/time — even without explicit words like "add" or "book". For example,
-  "lash appointment with Jermsy Beauty on 22nd June at 8AM" is a create action.
+- action "book_appointment": use when the user is booking a named person/client into
+  the Appointments calendar. Triggers on phrases like "book [name] in", "appointment
+  with [name]", "slot for [name]", "[name] appointment". The title should be just the
+  person/client name (e.g. "Nicholas", "Jermsy Beauty"). Date/time optional — if not
+  given, the bot will find the next available slot.
+- action "create": use for all other event creation (meetings, reminders, personal
+  events) that are NOT going into the Appointments calendar.
 - action "unknown": ONLY when intent is completely unclear with no date or event mentioned.
 - Return ONLY the JSON object, no explanation, no markdown fences.
 """
