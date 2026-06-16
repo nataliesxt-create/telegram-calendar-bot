@@ -50,10 +50,15 @@ Rules:
 - For times like "3pm" output "15:00", "10am" → "10:00".
 - For ambiguous time-of-day words (morning/afternoon/evening/night), set time to null
   and let the application resolve them — do NOT guess.
-- duration_minutes: parse "30 min", "2 hours", "1.5 hours" etc. Default null if absent.
-- calendar_hint: infer from context (e.g. "standup" → Work, "dentist" → Personal,
-  "lash appointment" → Personal/Self Care, "lunch with mum" → Personal). Use exact
-  calendar names from the provided list when possible. Null if genuinely unclear.
+- duration_minutes: parse "30 min", "2 hours", "1.5 hours" etc. If the event is an
+  appointment (beauty, lash, nails, facial, massage, salon, spa, brow, wax, blowout,
+  hair, doctor, dentist, physio, therapy, clinic) OR the calendar_hint is "Appointments",
+  default to 90 minutes unless the user specifies otherwise. For all other events default null.
+- calendar_hint: infer from context. Use exact calendar names from the provided list.
+  Beauty/self-care/health appointments (lash, nails, facial, massage, salon, spa, brow,
+  wax, blowout, hair, doctor, dentist, physio, therapy, clinic) → "Appointments" if that
+  calendar exists, else "Personal". Work meetings/standups → "Work". Social/family → "Personal".
+  Null if genuinely unclear.
 - is_correction: true when the user is amending their immediately previous instruction
   (phrases like "actually", "wait", "no make it", "change to", "instead").
 - action "correct": use when the user's message is clearly modifying the last action
