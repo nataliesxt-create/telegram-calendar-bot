@@ -1,7 +1,7 @@
 """
-NLP intent parsing via Claude Haiku.
+NLP intent parsing via OpenAI GPT-4o-mini.
 
-Sends each user message to Claude with a structured system prompt and
+Sends each user message to OpenAI with a structured system prompt and
 returns a parsed intent dict.
 """
 
@@ -11,13 +11,13 @@ import json
 import logging
 import re
 
-import anthropic
+from openai import OpenAI
 
-from config import ANTHROPIC_API_KEY
+from config import OPENAI_API_KEY
 
 logger = logging.getLogger(__name__)
 
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -52,15 +52,18 @@ Rules:
   and let the application resolve them — do NOT guess.
 - duration_minutes: parse "30 min", "2 hours", "1.5 hours" etc. Default null if absent.
 - calendar_hint: infer from context (e.g. "standup" → Work, "dentist" → Personal,
-  "lunch with mum" → Personal). Use exact calendar names from the provided list when
-  possible. Null if genuinely unclear.
+  "lash appointment" → Personal/Self Care, "lunch with mum" → Personal). Use exact
+  calendar names from the provided list when possible. Null if genuinely unclear.
 - is_correction: true when the user is amending their immediately previous instruction
   (phrases like "actually", "wait", "no make it", "change to", "instead").
 - action "correct": use when the user's message is clearly modifying the last action
   (e.g. "actually make it 4pm", "add it to Work instead").
 - action "view": for queries about what's scheduled ("what's on", "show me", "do I
   have anything").
-- action "unknown": when intent is completely unclear.
+- action "create": use when the user mentions any appointment, event, or activity with
+  a date/time — even without explicit words like "add" or "book". For example,
+  "lash appointment with Jermsy Beauty on 22nd June at 8AM" is a create action.
+- action "unknown": ONLY when intent is completely unclear with no date or event mentioned.
 - Return ONLY the JSON object, no explanation, no markdown fences.
 """
 
@@ -92,15 +95,17 @@ User message: {user_message}
 """.strip()
 
     try:
-        response = _client.messages.create(
-            model="claude-haiku-4-5-20251001",
+        response = _client.chat.completions.create(
+            model="gpt-4o-mini",
             max_tokens=512,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": context_block}],
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": context_block},
+            ],
         )
-        raw = response.content[0].text.strip()
+        raw = response.choices[0].message.content.strip()
 
-        # Strip markdown fences if Claude wrapped them anyway
+        # Strip markdown fences if model wrapped them anyway
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
 
@@ -108,7 +113,7 @@ User message: {user_message}
         intent.setdefault("original_message", user_message)
         return intent
 
-    except (json.JSONDecodeError, IndexError, anthropic.APIError) as exc:
+    except (json.JSONDecodeError, IndexError, Exception) as exc:
         logger.error("Intent parsing failed: %s", exc)
         return {
             "action": "unknown",

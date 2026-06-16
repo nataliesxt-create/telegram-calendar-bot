@@ -40,7 +40,7 @@ CREDENTIALS_PATH = "credentials.json"  # downloaded from Google Cloud Console
 TELEGRAM_TOKEN: str = os.environ["TELEGRAM_TOKEN"]
 GOOGLE_CLIENT_ID: str = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET: str = os.environ["GOOGLE_CLIENT_SECRET"]
-ANTHROPIC_API_KEY: str = os.environ["ANTHROPIC_API_KEY"]
+OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
 
 # OAuth redirect URI (must match Google Cloud Console)
 OAUTH_REDIRECT_URI: str = os.getenv("OAUTH_REDIRECT_URI", "urn:ietf:wg:oauth:2.0:oob")
