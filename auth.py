@@ -10,8 +10,8 @@ On save, both are updated. On load, env var takes priority over file.
 
 import json
 import os
-import subprocess
 
+import httpx
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -112,23 +112,47 @@ def load_credentials() -> Credentials | None:
 
 def _save_token(creds: Credentials) -> None:
     """
-    Persist credentials to token.json and to the Railway GOOGLE_TOKEN_JSON env var.
-
-    The Railway CLI call is best-effort — it won't crash the bot if it fails
-    (e.g. running locally without railway CLI).
+    Persist credentials to token.json and to the Railway GOOGLE_TOKEN_JSON env var
+    via the Railway API (works inside the container, no CLI needed).
     """
     token_data = creds.to_json()
 
-    # Always write to disk (works locally and gives Railway a fallback)
+    # Write to disk for local dev fallback
     with open(TOKEN_PATH, "w") as f:
         f.write(token_data)
 
-    # Also push to Railway env var so it survives redeploys
+    # Push to Railway via GraphQL API so it survives redeploys
+    _push_to_railway(token_data)
+
+
+def _push_to_railway(token_data: str) -> None:
+    """Update GOOGLE_TOKEN_JSON env var on Railway via their API."""
+    api_token = os.environ.get("RAILWAY_API_TOKEN")
+    service_id = os.environ.get("RAILWAY_SERVICE_ID")
+    environment_id = os.environ.get("RAILWAY_ENVIRONMENT_ID")
+
+    if not all([api_token, service_id, environment_id]):
+        return  # Running locally without Railway context
+
+    query = """
+    mutation upsertVariables($input: VariableCollectionUpsertInput!) {
+      variableCollectionUpsert(input: $input)
+    }
+    """
+    variables = {
+        "input": {
+            "serviceId": service_id,
+            "environmentId": environment_id,
+            "variables": {"GOOGLE_TOKEN_JSON": token_data},
+        }
+    }
+
     try:
-        subprocess.run(
-            ["railway", "variables", "--set", f"GOOGLE_TOKEN_JSON={token_data}"],
-            capture_output=True,
-            timeout=15,
+        httpx.post(
+            "https://backboard.railway.com/graphql/v2",
+            json={"query": query, "variables": variables},
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=10,
         )
     except Exception:
-        pass  # Local dev without railway CLI — that's fine
+        pass
