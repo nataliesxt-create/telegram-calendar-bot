@@ -16,7 +16,7 @@ from googleapiclient.discovery import build
 from config import CLASH_EXCLUDED_CALENDARS, DEFAULT_CALENDAR, LOOKAHEAD_DAYS, TIMEZONE, TZ
 
 # Google Calendar color IDs
-COLOR_GREEN = "2"   # Sage → confirmed appointment
+COLOR_GREEN = "10"  # Basil → confirmed appointment (standard green in Google Calendar)
 COLOR_RED   = "11"  # Tomato → placeholder block
 
 APPOINTMENT_PLACEHOLDER_PREFIX = "Appointment:"
