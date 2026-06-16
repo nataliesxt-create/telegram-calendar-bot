@@ -952,6 +952,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             transcript = openai_client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
+                language="en",
             )
         text = transcript.text.strip()
         if not text:
