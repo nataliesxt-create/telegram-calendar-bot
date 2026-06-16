@@ -1,12 +1,16 @@
 """
 Google OAuth 2.0 flow for a single user.
 
-Stores credentials in token.json and auto-refreshes on expiry.
-Generates an auth URL that the bot can send to the user via Telegram.
+Token is persisted in two places:
+  1. token.json on disk (for local dev)
+  2. GOOGLE_TOKEN_JSON env var on Railway (survives redeploys)
+
+On save, both are updated. On load, env var takes priority over file.
 """
 
 import json
 import os
+import subprocess
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -27,7 +31,6 @@ def _client_config() -> dict:
     if os.path.exists(CREDENTIALS_PATH):
         with open(CREDENTIALS_PATH) as f:
             return json.load(f)
-    # Fall back to individual env vars
     return {
         "installed": {
             "client_id": GOOGLE_CLIENT_ID,
@@ -69,7 +72,7 @@ def exchange_code(flow: Flow, code: str) -> Credentials:
         code:  The code the user received after authorising.
 
     Returns:
-        Google Credentials object (also saved to TOKEN_PATH).
+        Google Credentials object (also saved to disk + Railway env var).
     """
     flow.fetch_token(code=code)
     creds = flow.credentials
@@ -79,15 +82,26 @@ def exchange_code(flow: Flow, code: str) -> Credentials:
 
 def load_credentials() -> Credentials | None:
     """
-    Load credentials from token.json, refreshing if expired.
+    Load credentials, preferring the GOOGLE_TOKEN_JSON env var over token.json.
+
+    Auto-refreshes expired tokens and re-persists them.
 
     Returns:
         Valid Credentials, or None if the user hasn't authenticated yet.
     """
-    if not os.path.exists(TOKEN_PATH):
-        return None
+    token_json = os.environ.get("GOOGLE_TOKEN_JSON")
 
-    creds = Credentials.from_authorized_user_file(TOKEN_PATH, GOOGLE_SCOPES)
+    if token_json:
+        try:
+            creds = Credentials.from_authorized_user_info(
+                json.loads(token_json), GOOGLE_SCOPES
+            )
+        except Exception:
+            creds = None
+    elif os.path.exists(TOKEN_PATH):
+        creds = Credentials.from_authorized_user_file(TOKEN_PATH, GOOGLE_SCOPES)
+    else:
+        return None
 
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
@@ -97,6 +111,24 @@ def load_credentials() -> Credentials | None:
 
 
 def _save_token(creds: Credentials) -> None:
-    """Persist credentials to TOKEN_PATH."""
+    """
+    Persist credentials to token.json and to the Railway GOOGLE_TOKEN_JSON env var.
+
+    The Railway CLI call is best-effort — it won't crash the bot if it fails
+    (e.g. running locally without railway CLI).
+    """
+    token_data = creds.to_json()
+
+    # Always write to disk (works locally and gives Railway a fallback)
     with open(TOKEN_PATH, "w") as f:
-        f.write(creds.to_json())
+        f.write(token_data)
+
+    # Also push to Railway env var so it survives redeploys
+    try:
+        subprocess.run(
+            ["railway", "variables", "--set", f"GOOGLE_TOKEN_JSON={token_data}"],
+            capture_output=True,
+            timeout=15,
+        )
+    except Exception:
+        pass  # Local dev without railway CLI — that's fine
