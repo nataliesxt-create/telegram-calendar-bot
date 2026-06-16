@@ -50,29 +50,29 @@ Rules:
 - For times like "3pm" output "15:00", "10am" → "10:00".
 - For ambiguous time-of-day words (morning/afternoon/evening/night), set time to null
   and let the application resolve them — do NOT guess.
-- duration_minutes: parse "30 min", "2 hours", "1.5 hours" etc. If the event is an
-  appointment (beauty, lash, nails, facial, massage, salon, spa, brow, wax, blowout,
-  hair, doctor, dentist, physio, therapy, clinic) OR the calendar_hint is "Appointments",
-  default to 90 minutes unless the user specifies otherwise. For all other events default null.
-- calendar_hint: infer from context. Use exact calendar names from the provided list.
-  Beauty/self-care/health appointments (lash, nails, facial, massage, salon, spa, brow,
-  wax, blowout, hair, doctor, dentist, physio, therapy, clinic) → "Appointments" if that
-  calendar exists, else "Personal". Work meetings/standups → "Work". Social/family → "Personal".
-  Null if genuinely unclear.
+- duration_minutes: parse "30 min", "2 hours", "1.5 hours" etc.
+  If action is "book_appointment" OR calendar_hint is "Appointments", default to 90 minutes.
+  For all other events default null (app will use its own default).
+- calendar_hint: infer from context using these strict rules:
+  1. SELF CARE calendar: lash, nails, facial, massage, salon, spa, brow, wax, blowout,
+     hair, dentist, doctor, physio, therapy, clinic, dermatologist, GP, optician.
+     These are personal health/beauty appointments for the user themselves.
+  2. APPOINTMENTS calendar: booking a named client or person in for a session.
+     Only use when the user is the service provider (e.g. "appointment with Nicholas",
+     "book Sarah in", "slot for Michael"). Title = client name only.
+  3. WORK calendar: meetings, standups, calls, interviews, work events.
+  4. PERSONAL calendar: social events, family, friends, errands.
+  Use exact calendar names from the provided list. Null if genuinely unclear.
 - is_correction: true when the user is amending their immediately previous instruction
   (phrases like "actually", "wait", "no make it", "change to", "instead").
-- action "correct": use when the user's message is clearly modifying the last action
-  (e.g. "actually make it 4pm", "add it to Work instead").
-- action "view": for queries about what's scheduled ("what's on", "show me", "do I
-  have anything").
-- action "book_appointment": use when the user is booking a named person/client into
-  the Appointments calendar. Triggers on phrases like "book [name] in", "appointment
-  with [name]", "slot for [name]", "[name] appointment". The title should be just the
-  person/client name (e.g. "Nicholas", "Jermsy Beauty"). Date/time optional — if not
-  given, the bot will find the next available slot.
-- action "create": use for all other event creation (meetings, reminders, personal
-  events) that are NOT going into the Appointments calendar.
-- action "unknown": ONLY when intent is completely unclear with no date or event mentioned.
+- action "correct": use when the user's message is clearly modifying the last action.
+- action "view": for queries about what's scheduled ("what's on", "show me", "do I have anything").
+- action "book_appointment": ONLY when the user is booking a named client/person into
+  their Appointments calendar (they are the provider, not the recipient). Examples:
+  "appointment with Nicholas", "book Sarah in for Thursday", "slot for Michael at 2pm".
+  Title = client name only (e.g. "Nicholas", "Sarah"). Date/time optional.
+- action "create": all other event creation — personal, work, self-care, social.
+- action "unknown": ONLY when intent is completely unclear.
 - Return ONLY the JSON object, no explanation, no markdown fences.
 """
 
