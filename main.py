@@ -790,6 +790,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _resolve_match_pick(update, user_id, int(text.strip()), service, calendars)
         return
 
+    # --- Pending calendar pick (numbered reply) ---
+    if session.pending_calendar_pick and text.strip().isdigit():
+        choice = int(text.strip())
+        cal_list = session.pending_calendar_list
+        if 1 <= choice <= len(cal_list):
+            chosen_cal = cal_list[choice - 1]
+            intent = session.pending_calendar_intent
+            session.pending_calendar_pick = False
+            session.pending_calendar_list = []
+            session.pending_calendar_intent = None
+
+            start_dt = _resolve_datetime(intent)
+            duration = intent.get("duration_minutes") or DEFAULT_DURATION_MINUTES
+            intent["title"] = intent.get("title") or "New Event"
+
+            await _handle_create(
+                update, user_id, intent, service, calendars,
+                start_dt, duration, chosen_cal["id"], chosen_cal["name"],
+            )
+        else:
+            await update.message.reply_text(f"Please reply with a number between 1 and {len(cal_list)}.")
+        return
+
     # --- Pending appointment booking confirmation (yes/no) ---
     if session.pending_appointment_booking:
         text_lower = text.lower().strip()
@@ -857,12 +880,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         duration = intent.get("duration_minutes") or DEFAULT_DURATION_MINUTES
         hint = intent.get("calendar_hint")
+        title = intent.get("title") or "New Event"
+        intent["title"] = title
+
+        # If unsure about calendar, ask before creating
+        if hint == "ASK" or not hint:
+            cal_list = "\n".join(f"{i+1}. {c['name']}" for i, c in enumerate(calendars))
+            s = session_memory.get(user_id)
+            s.pending_calendar_pick = True
+            s.pending_calendar_list = calendars
+            s.pending_calendar_intent = intent
+            await update.message.reply_text(
+                f"Which calendar should I add *{title}* to?\n\n{cal_list}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
         calendar_id = calendar_service.find_calendar_id(calendars, hint)
         calendar_name = next(
             (c["name"] for c in calendars if c["id"] == calendar_id), "Primary"
         )
-        title = intent.get("title") or "New Event"
-        intent["title"] = title
 
         await _handle_create(
             update, user_id, intent, service, calendars,

@@ -53,16 +53,31 @@ Rules:
 - duration_minutes: parse "30 min", "2 hours", "1.5 hours" etc.
   If action is "book_appointment" OR calendar_hint is "Appointments", default to 90 minutes.
   For all other events default null (app will use its own default).
-- calendar_hint: infer from context using these strict rules:
-  1. SELF CARE calendar: lash, nails, facial, massage, salon, spa, brow, wax, blowout,
-     hair, dentist, doctor, physio, therapy, clinic, dermatologist, GP, optician.
-     These are personal health/beauty appointments for the user themselves.
-  2. APPOINTMENTS calendar: booking a named client or person in for a session.
-     Only use when the user is the service provider (e.g. "appointment with Nicholas",
-     "book Sarah in", "slot for Michael"). Title = client name only.
-  3. WORK calendar: meetings, standups, calls, interviews, work events.
-  4. PERSONAL calendar: social events, family, friends, errands.
-  Use exact calendar names from the provided list. Null if genuinely unclear.
+- calendar_hint: infer from context using these strict rules in order:
+  1. "Self Care + Activities": user is doing something for themselves —
+     lash, nails, facial, massage, salon, spa, brow, wax, blowout, hair,
+     dentist, doctor, physio, therapy, clinic, dermatologist, GP, optician,
+     gym, workout, yoga, pilates, run, hike, sports, hobby, activity.
+  2. "Appointments": ONLY when user is the SERVICE PROVIDER booking a client in —
+     "appointment with [client name]", "book [name] in", "slot for [name]".
+  3. "West Family": any event mentioning Ellie, Chris, or family.
+  4. "branding dept": anything branding-related.
+  5. "Roadshows": roadshow events.
+  6. "Travels + Work Trips": travel, flights, trips, hotels, overseas.
+  7. "Social Media & Content": filming, content creation, blog, photoshoot, social media, recording.
+  8. "Birthdays": birthdays.
+  9. "Routines": routines, habits, daily recurring tasks.
+  10. "Commute and Activities": commute, school run, picking up/dropping off.
+  11. "Growth-centric": courses, learning, books, workshops, personal development, seminars.
+  12. "Bloom Into Legacy": anything related to Bloom Into Legacy brand/business.
+  13. "Champagne & Chaos": anything related to Champagne & Chaos brand/business.
+  14. "Work": construction-related — architects, HDB, MOE, contractors, authorities,
+      site visits, permits, renovation, building works.
+  15. "Team Meetings + Events": ONLY when user explicitly says "team".
+  16. "Agency Events + Meetings": company/agency-wide events — congresses, boost events,
+      company launches, Great Eastern, Craigasabel, agency-level gatherings.
+  17. "ASK": if none of the above apply clearly, or if it could be Agency Events vs
+      Team Meetings and the user hasn't specified. Do NOT guess — return "ASK".
 - is_correction: true when the user is amending their immediately previous instruction
   (phrases like "actually", "wait", "no make it", "change to", "instead").
 - action "correct": use when the user's message is clearly modifying the last action.

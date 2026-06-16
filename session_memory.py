@@ -39,6 +39,11 @@ class SessionState:
     pending_match_action: str | None = None  # "edit" or "delete"
     pending_intent: dict | None = None  # original intent for edit/delete
 
+    # Pending calendar pick (when bot asks "which calendar?")
+    pending_calendar_pick: bool = False
+    pending_calendar_list: list[dict] = field(default_factory=list)  # list of calendar dicts
+    pending_calendar_intent: dict | None = None  # the original intent waiting for calendar
+
     # Pending appointment booking confirmation
     pending_appointment_booking: dict | None = None  # {placeholder_id, client_name, start_dt, appt_cal_id, appt_cal_name}
 
