@@ -721,8 +721,13 @@ async def _resolve_match_pick(
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route all non-command text messages."""
-    user_id = update.effective_user.id
     text = (update.message.text or "").strip()
+    await _process_text(update, context, text)
+
+
+async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    """Core routing logic — shared by text messages and voice transcriptions."""
+    user_id = update.effective_user.id
 
     session = session_memory.get(user_id)
     session_memory.touch(user_id)
@@ -962,9 +967,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info("Voice transcribed: %s", text)
         await update.message.reply_text(f'🎙️ _"{text}"_', parse_mode=ParseMode.MARKDOWN)
 
-        # Inject the transcribed text as a fake text message and reuse handle_message
-        update.message.text = text
-        await handle_message(update, context)
+        # Process transcribed text directly through the message handling logic
+        await _process_text(update, context, text)
 
     except Exception as exc:
         logger.error("Voice transcription failed: %s", exc)
