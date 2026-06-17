@@ -144,8 +144,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if creds:
         await update.message.reply_text(
-            "✅ You're already connected to Google Calendar!\n"
-            "Try: 'What do I have tomorrow?' or 'Add a meeting at 3pm'"
+            "✅ Hey! I'm *Ouni* and I'm already connected to your Google Calendar.\n"
+            "Just tell me what you need — text or voice note works!",
+            parse_mode=ParseMode.MARKDOWN,
         )
         return
 
@@ -154,10 +155,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session.pending_auth_flow = flow
 
     await update.message.reply_text(
-        "👋 Hi! Let's connect your Google Calendar.\n\n"
+        "👋 Hi, I'm *Ouni* — your personal calendar assistant.\n\n"
+        "Let's connect your Google Calendar first:\n\n"
         "1. Visit this link to authorise:\n"
         f"{auth_url}\n\n"
-        "2. Copy the code Google gives you and send it here."
+        "2. Copy the code Google gives you and send it here.",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
@@ -166,12 +169,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     /help — display usage examples.
     """
     await update.message.reply_text(
-        "Here's what I can do:\n\n"
-        "📅 *Create:* 'Add a dentist appointment Friday at 10am'\n"
+        "*Ouni* — your calendar assistant 📅\n\n"
+        "📅 *Add:* 'Lash appointment with Jermsy Beauty on 22nd June at 8am'\n"
+        "📋 *Book client:* 'Appointment with Nicholas at 1pm Thursday'\n"
         "✏️ *Edit:* 'Move my 3pm call to 5pm'\n"
         "🗑️ *Delete:* 'Cancel my dentist on Friday'\n"
         "👀 *View:* 'What do I have tomorrow?' or 'Show me Thursday grouped by calendar'\n"
-        "🔁 *Correct:* 'Actually make it 4pm' or 'Add it to Work instead'",
+        "🔁 *Correct:* 'Actually make it 4pm' or 'Add it to Work instead'\n"
+        "🎙️ *Voice notes supported* — just hold and speak",
         parse_mode=ParseMode.MARKDOWN,
     )
 
