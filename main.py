@@ -716,11 +716,12 @@ async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text
     # --- OAuth code exchange ---
     if session.pending_auth_flow is not None:
         try:
-            auth.exchange_code(session.pending_auth_flow, text)
+            creds = auth.exchange_code(session.pending_auth_flow, text)
             session.pending_auth_flow = None
+            # Log token so it can be captured and set as env var
+            logger.info("GOOGLE_TOKEN_JSON=%s", creds.to_json())
             # Pre-load calendars
             global _calendars_cache
-            creds = auth.load_credentials()
             svc = calendar_service.build_service(creds)
             _calendars_cache = calendar_service.list_calendars(svc)
             cal_names = ", ".join(c["name"] for c in _calendars_cache)
