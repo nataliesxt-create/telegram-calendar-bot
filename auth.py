@@ -140,18 +140,17 @@ def _push_to_railway(token_data: str) -> None:
         return
 
     query = """
-    mutation($serviceId: String!, $environmentId: String!, $variables: ServiceVariables!) {
-      variableCollectionUpsert(
-        serviceId: $serviceId
-        environmentId: $environmentId
-        variables: $variables
-      )
+    mutation($input: VariableCollectionUpsertInput!) {
+      variableCollectionUpsert(input: $input)
     }
     """
     variables = {
-        "serviceId": service_id,
-        "environmentId": environment_id,
-        "variables": {"GOOGLE_TOKEN_JSON": token_data},
+        "input": {
+            "projectId": os.environ.get("RAILWAY_PROJECT_ID", ""),
+            "serviceId": service_id,
+            "environmentId": environment_id,
+            "variables": {"GOOGLE_TOKEN_JSON": token_data},
+        }
     }
 
     try:
