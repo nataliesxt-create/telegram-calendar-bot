@@ -667,6 +667,25 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = update.effective_user.id
     data = query.data or ""
 
+    try:
+        await _dispatch_callback(update, context, user_id, data)
+    except Exception as exc:
+        logger.exception("Callback handler error for data=%r: %s", data, exc)
+        try:
+            await query.message.reply_text(f"❌ Something went wrong: {exc}")
+        except Exception:
+            pass
+
+
+async def _dispatch_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    data: str,
+) -> None:
+    """Inner callback dispatcher — wrapped by handle_callback_query for error handling."""
+    query = update.callback_query
+
     service, calendars = _get_service_and_calendars()
     if service is None:
         await query.edit_message_text("Google Calendar isn't connected. Use /start.")
