@@ -64,7 +64,7 @@ Rules:
   4. "branding dept": anything branding-related.
   5. "Roadshows": roadshow events.
   6. "Travels + Work Trips": travel, flights, trips, hotels, overseas.
-  7. "Social Media & Content": filming, content creation, blog, photoshoot, social media, recording.
+  7. "Social Media & Content": ONLY explicit content production — filming, photoshoot, recording, content shoot, blog shoot. NOT meals, restaurants, social gatherings, or events at a venue.
   8. "Birthdays": birthdays.
   9. "Routines": routines, habits, daily recurring tasks.
   10. "Commute and Activities": commute, school run, picking up/dropping off.
@@ -76,8 +76,9 @@ Rules:
   15. "Team Meetings + Events": ONLY when user explicitly says "team".
   16. "Agency Events + Meetings": company/agency-wide events — congresses, boost events,
       company launches, Great Eastern, Craigasabel, agency-level gatherings.
-  17. "ASK": if none of the above apply clearly, or if it could be Agency Events vs
-      Team Meetings and the user hasn't specified. Do NOT guess — return "ASK".
+  17. "ASK": if none of the above apply clearly. Common cases that should always ASK:
+      meals/dinner/lunch/breakfast/coffee, catch-ups, social events with friends,
+      restaurant names, anything ambiguous. Do NOT guess — return "ASK".
 - is_correction: true when the user is amending their immediately previous instruction
   (phrases like "actually", "wait", "no make it", "change to", "instead").
 - action "correct": use when the user's message is clearly modifying the last action.
