@@ -136,6 +136,8 @@ User message: {user_message}
 
         intent = json.loads(raw)
         intent.setdefault("original_message", user_message)
+        logger.info("Intent parsed: action=%s calendar_hint=%s title=%s",
+                    intent.get("action"), intent.get("calendar_hint"), intent.get("title"))
         return intent
 
     except (json.JSONDecodeError, IndexError, Exception) as exc:
