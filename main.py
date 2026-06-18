@@ -10,10 +10,11 @@ from __future__ import annotations
 import datetime
 import logging
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -124,7 +125,7 @@ async def _require_auth(update: Update, user_id: int) -> bool:
     creds = auth.load_credentials()
     if creds:
         return True
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "You need to connect Google Calendar first.\n"
         "Use /start to get your authorisation link."
     )
@@ -143,7 +144,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     creds = auth.load_credentials()
 
     if creds:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "✅ Hey! I'm *Ouni* and I'm already connected to your Google Calendar.\n"
             "Just tell me what you need — text or voice note works!",
             parse_mode=ParseMode.MARKDOWN,
@@ -154,7 +155,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = session_memory.get(user_id)
     session.pending_auth_flow = flow
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "👋 Hi, I'm *Ouni* — your personal calendar assistant.\n\n"
         "Let's connect your Google Calendar first:\n\n"
         "1. Visit this link to authorise:\n"
@@ -168,7 +169,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /help — display usage examples.
     """
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "*Ouni* — your calendar assistant 📅\n\n"
         "📅 *Add:* 'Lash appointment with Jermsy Beauty on 22nd June at 8am'\n"
         "📋 *Book client:* 'Appointment with Nicholas at 1pm Thursday'\n"
@@ -202,7 +203,7 @@ async def _handle_book_appointment(
     """
     appt_cal = calendar_service.find_appointments_calendar(calendars)
     if not appt_cal:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "❌ I couldn't find an 'Appointments' calendar. Please create one in Google Calendar first."
         )
         return
@@ -211,7 +212,7 @@ async def _handle_book_appointment(
     date_str = intent.get("date")
     time_str = intent.get("time")
 
-    await update.message.reply_text("🔍 Checking your Appointments calendar...")
+    await update.effective_message.reply_text("🔍 Checking your Appointments calendar...")
 
     target_dt = _resolve_datetime(intent) if (date_str and time_str) else None
     on_date = target_dt.date() if target_dt else (datetime.date.fromisoformat(date_str) if date_str else None)
@@ -238,7 +239,7 @@ async def _handle_book_appointment(
         if not placeholders:
             msg = "No available appointment slots found"
             msg += f" on {on_date.strftime('%a %-d %b')}" if on_date else " coming up"
-            await update.message.reply_text(f"❌ {msg}. Add a red 'Appointment:' block to your calendar first.")
+            await update.effective_message.reply_text(f"❌ {msg}. Add a red 'Appointment:' block to your calendar first.")
             return
 
         p = placeholders[0]
@@ -271,11 +272,17 @@ async def _propose_appointment(
         "appt_cal_name": appt_cal["name"],
     }
 
-    await update.message.reply_text(
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Yes, book it", callback_data="appt:yes"),
+            InlineKeyboardButton("❌ Cancel", callback_data="appt:no"),
+        ]
+    ])
+    await update.effective_message.reply_text(
         f"📅 *{day_str}* at {time_str}\n\n"
-        f"Book *Appointment: {client_name}* here?\n"
-        f"Reply *yes* to confirm or *no* to cancel.",
+        f"Book *Appointment: {client_name}* here?",
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
     )
 
 
@@ -313,11 +320,10 @@ async def _handle_create(
         s.calendar_name = calendar_name
         s.start_dt = start_dt
 
-        msg = clash_detector.format_clash_message(clashing, free_slots)
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        await _send_clash_buttons(update, clashing, free_slots)
         return
 
-    await update.message.reply_text("🔍 Checking your calendar...")
+    await update.effective_message.reply_text("🔍 Checking your calendar...")
 
     event = calendar_service.create_event(
         service, calendar_id, intent["title"], start_dt, duration_minutes
@@ -325,7 +331,7 @@ async def _handle_create(
 
     day_str = _format_date_header(start_dt)
     time_str = start_dt.strftime("%-I:%M %p")
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"✅ Event created — *{event['title']}* on {day_str} at {time_str} · {calendar_name}",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -349,7 +355,7 @@ async def _handle_edit(
     calendars: list[dict],
 ) -> None:
     """Edit an existing event by title, with multi-match selection if needed."""
-    await update.message.reply_text("🔍 Checking your calendar...")
+    await update.effective_message.reply_text("🔍 Checking your calendar...")
 
     query = intent.get("title") or ""
     date_str = intent.get("date")
@@ -358,22 +364,15 @@ async def _handle_edit(
     matches = calendar_service.search_events(service, calendars, query, search_date)
 
     if not matches:
-        await update.message.reply_text(f"❌ No event found matching '{query}'.")
+        await update.effective_message.reply_text(f"❌ No event found matching '{query}'.")
         return
 
     if len(matches) > 1:
-        # Ask user to pick
         s = session_memory.get(user_id)
         s.pending_matches = matches
         s.pending_match_action = "edit"
         s.pending_intent = intent
-
-        lines = ["Multiple events found. Which one?\n"]
-        for i, ev in enumerate(matches, 1):
-            day = ev["start"].strftime("%a %-d %b")
-            time = ev["start"].strftime("%-I:%M %p")
-            lines.append(f"{i}. {ev['title']} — {day} at {time} · {ev.get('calendar_name', '')}")
-        await update.message.reply_text("\n".join(lines))
+        await _send_match_buttons(update, matches, "Which event to edit?")
         return
 
     event = matches[0]
@@ -415,8 +414,7 @@ async def _apply_edit(
             s.duration_minutes = new_duration or DEFAULT_DURATION_MINUTES
             s.start_dt = new_start
 
-            msg = clash_detector.format_clash_message(clashing, free_slots)
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+            await _send_clash_buttons(update, clashing, free_slots)
             return
 
     # Determine new calendar if hint provided
@@ -442,7 +440,7 @@ async def _apply_edit(
     final_start = updated["start"]
     day_str = _format_date_header(final_start)
     time_str = final_start.strftime("%-I:%M %p")
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"📝 Updated — *{updated['title']}* now on {day_str} at {time_str} · {new_calendar_name}",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -466,7 +464,7 @@ async def _handle_delete(
     calendars: list[dict],
 ) -> None:
     """Delete an event by title, with multi-match selection if needed."""
-    await update.message.reply_text("🔍 Checking your calendar...")
+    await update.effective_message.reply_text("🔍 Checking your calendar...")
 
     query = intent.get("title") or ""
     date_str = intent.get("date")
@@ -475,7 +473,7 @@ async def _handle_delete(
     matches = calendar_service.search_events(service, calendars, query, search_date)
 
     if not matches:
-        await update.message.reply_text("❌ No event found matching that.")
+        await update.effective_message.reply_text("❌ No event found matching that.")
         return
 
     if len(matches) > 1:
@@ -483,19 +481,13 @@ async def _handle_delete(
         s.pending_matches = matches
         s.pending_match_action = "delete"
         s.pending_intent = intent
-
-        lines = ["Multiple events found. Which one to delete?\n"]
-        for i, ev in enumerate(matches, 1):
-            day = ev["start"].strftime("%a %-d %b")
-            time = ev["start"].strftime("%-I:%M %p")
-            lines.append(f"{i}. {ev['title']} — {day} at {time} · {ev.get('calendar_name', '')}")
-        await update.message.reply_text("\n".join(lines))
+        await _send_match_buttons(update, matches, "Which event to delete?")
         return
 
     event = matches[0]
     calendar_service.delete_event(service, event["calendar_id"], event["id"])
     day_str = event["start"].strftime("%a %-d %b")
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"🗑️ Deleted — *{event['title']}* on {day_str}",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -523,7 +515,7 @@ async def _handle_view(
     header = _format_date_header(day_label)
 
     if not events:
-        await update.message.reply_text(f"📅 Nothing scheduled on {header}.")
+        await update.effective_message.reply_text(f"📅 Nothing scheduled on {header}.")
         return
 
     msg_lower = (intent.get("original_message") or "").lower()
@@ -545,7 +537,7 @@ async def _handle_view(
         for ev in events:
             lines.append(_format_event_line(ev))
 
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
 async def _handle_correct(
@@ -562,7 +554,7 @@ async def _handle_correct(
     """
     s = session_memory.get(user_id)
     if not s.action or not s.event_id:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "I don't have a recent action to correct. Please describe what you'd like to change."
         )
         return
@@ -595,6 +587,278 @@ async def _handle_correct(
 
 
 # ---------------------------------------------------------------------------
+# Inline keyboard helpers
+# ---------------------------------------------------------------------------
+
+async def _send_clash_buttons(
+    update: Update,
+    clashing: list[dict],
+    free_slots: list[datetime.datetime],
+) -> None:
+    """Send clash warning with inline slot buttons."""
+    clash_titles = ", ".join(e["title"] for e in clashing[:3])
+    lines = [f"⚠️ Clash with: *{clash_titles}*\n"]
+
+    buttons = []
+    for i, slot in enumerate(free_slots[:3]):
+        label = slot.strftime("%a %-d %b · %-I:%M %p")
+        lines.append(f"• {label}")
+        buttons.append(InlineKeyboardButton(label, callback_data=f"clash:{i}"))
+
+    keyboard = InlineKeyboardMarkup([
+        buttons,
+        [InlineKeyboardButton("Keep Original Time", callback_data="clash:keep")],
+    ])
+    await update.effective_message.reply_text(
+        "\n".join(lines) + "\n\nPick a free slot or keep your original time:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+    )
+
+
+async def _send_match_buttons(
+    update: Update,
+    matches: list[dict],
+    prompt: str,
+) -> None:
+    """Send a list of matching events as inline buttons."""
+    buttons = []
+    for i, ev in enumerate(matches):
+        day = ev["start"].strftime("%a %-d %b")
+        time = ev["start"].strftime("%-I:%M %p")
+        label = f"{ev['title']} · {day} {time}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"match:{i}")])
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.effective_message.reply_text(prompt, reply_markup=keyboard)
+
+
+async def _send_calendar_pick_buttons(
+    update: Update,
+    title: str,
+    calendars: list[dict],
+) -> None:
+    """Send calendar picker as inline buttons (2 per row)."""
+    buttons = []
+    row: list[InlineKeyboardButton] = []
+    for i, cal in enumerate(calendars):
+        row.append(InlineKeyboardButton(cal["name"], callback_data=f"cal:{i}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.effective_message.reply_text(
+        f"Which calendar should I add *{title}* to?",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Callback query handler (inline button presses)
+# ---------------------------------------------------------------------------
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Route all inline keyboard button presses."""
+    query = update.callback_query
+    await query.answer()  # dismiss the loading spinner
+
+    user_id = update.effective_user.id
+    data = query.data or ""
+
+    service, calendars = _get_service_and_calendars()
+    if service is None:
+        await query.edit_message_text("Google Calendar isn't connected. Use /start.")
+        return
+
+    session = session_memory.get(user_id)
+
+    # --- Clash slot pick ---
+    if data.startswith("clash:"):
+        value = data.split(":", 1)[1]
+
+        if value == "keep":
+            session.pending_clash = False
+            duration = session.duration_minutes or DEFAULT_DURATION_MINUTES
+            if session.clash_pending_action == "create":
+                event = calendar_service.create_event(
+                    service, session.calendar_id, session.title,
+                    session.start_dt, duration
+                )
+                day_str = _format_date_header(session.start_dt)
+                time_str = session.start_dt.strftime("%-I:%M %p")
+                await query.edit_message_text(
+                    f"✅ Event created — *{event['title']}* on {day_str} at {time_str} · {session.calendar_name}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                session_memory.record_action(
+                    user_id, action="create", title=event["title"],
+                    start_dt=session.start_dt, duration_minutes=duration,
+                    calendar_id=session.calendar_id, calendar_name=session.calendar_name,
+                    event_id=event["id"],
+                )
+            elif session.clash_pending_action == "edit":
+                updated = calendar_service.update_event(
+                    service, session.calendar_id, session.event_id,
+                    start_dt=session.start_dt, duration_minutes=duration
+                )
+                day_str = _format_date_header(session.start_dt)
+                time_str = session.start_dt.strftime("%-I:%M %p")
+                await query.edit_message_text(
+                    f"📝 Updated — *{updated['title']}* now on {day_str} at {time_str} · {session.calendar_name}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            return
+
+        slot_index = int(value)
+        slots = session.clash_slots or []
+        if slot_index >= len(slots):
+            await query.edit_message_text("That slot is no longer available.")
+            return
+
+        chosen_start = slots[slot_index]
+        duration = session.duration_minutes or DEFAULT_DURATION_MINUTES
+
+        if session.clash_pending_action == "create":
+            event = calendar_service.create_event(
+                service, session.calendar_id, session.title, chosen_start, duration
+            )
+            day_str = _format_date_header(chosen_start)
+            time_str = chosen_start.strftime("%-I:%M %p")
+            await query.edit_message_text(
+                f"✅ Event created — *{event['title']}* on {day_str} at {time_str} · {session.calendar_name}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            session_memory.record_action(
+                user_id, action="create", title=event["title"],
+                start_dt=chosen_start, duration_minutes=duration,
+                calendar_id=session.calendar_id, calendar_name=session.calendar_name,
+                event_id=event["id"],
+            )
+        elif session.clash_pending_action == "edit":
+            updated = calendar_service.update_event(
+                service, session.calendar_id, session.event_id,
+                start_dt=chosen_start, duration_minutes=duration
+            )
+            day_str = _format_date_header(chosen_start)
+            time_str = chosen_start.strftime("%-I:%M %p")
+            await query.edit_message_text(
+                f"📝 Updated — *{updated['title']}* now on {day_str} at {time_str} · {session.calendar_name}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            session_memory.record_action(
+                user_id, action="edit", title=updated["title"],
+                start_dt=chosen_start, duration_minutes=duration,
+                calendar_id=session.calendar_id, calendar_name=session.calendar_name,
+                event_id=updated["id"],
+            )
+        session.pending_clash = False
+        return
+
+    # --- Multi-match event pick ---
+    if data.startswith("match:"):
+        match_index = int(data.split(":", 1)[1])
+        matches = session.pending_matches or []
+        if match_index >= len(matches):
+            await query.edit_message_text("That event is no longer available.")
+            return
+
+        event = matches[match_index]
+        action = session.pending_match_action
+        intent = session.pending_intent or {}
+        session.pending_matches = []
+        session.pending_match_action = None
+        session.pending_intent = None
+
+        # We need a real update object to pass to _apply_edit/_handle_delete
+        # Patch the original message so downstream reply_text works
+        if action == "edit":
+            await query.edit_message_text(f"✏️ Editing *{event['title']}*...", parse_mode=ParseMode.MARKDOWN)
+            await _apply_edit(update, user_id, intent, service, calendars, event)
+        elif action == "delete":
+            calendar_service.delete_event(service, event["calendar_id"], event["id"])
+            day_str = event["start"].strftime("%a %-d %b")
+            await query.edit_message_text(
+                f"🗑️ Deleted — *{event['title']}* on {day_str}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            session_memory.clear(user_id)
+        return
+
+    # --- Calendar picker ---
+    if data.startswith("cal:"):
+        cal_index = int(data.split(":", 1)[1])
+        cal_list = session.pending_calendar_list or []
+        if cal_index >= len(cal_list):
+            await query.edit_message_text("Calendar not found.")
+            return
+
+        chosen_cal = cal_list[cal_index]
+        intent = session.pending_calendar_intent or {}
+        session.pending_calendar_pick = False
+        session.pending_calendar_list = []
+        session.pending_calendar_intent = None
+
+        start_dt = _resolve_datetime(intent)
+        duration = intent.get("duration_minutes") or DEFAULT_DURATION_MINUTES
+        intent["title"] = intent.get("title") or "New Event"
+
+        await query.edit_message_text(f"📅 Adding to *{chosen_cal['name']}*...", parse_mode=ParseMode.MARKDOWN)
+        await _handle_create(
+            update, user_id, intent, service, calendars,
+            start_dt, duration, chosen_cal["id"], chosen_cal["name"],
+        )
+        return
+
+    # --- Appointment confirm/cancel ---
+    if data.startswith("appt:"):
+        value = data.split(":", 1)[1]
+        booking = session.pending_appointment_booking
+
+        if not booking:
+            await query.edit_message_text("No pending appointment to confirm.")
+            return
+
+        if value == "yes":
+            session.pending_appointment_booking = None
+            appt_cal = calendar_service.find_appointments_calendar(calendars)
+            start_dt = booking["start_dt"]
+            duration = calendar_service.APPOINTMENT_DURATION_MINUTES
+
+            if booking.get("placeholder_id"):
+                try:
+                    calendar_service.delete_event(service, appt_cal["id"], booking["placeholder_id"])
+                except Exception:
+                    pass
+
+            event = calendar_service.create_event(
+                service, appt_cal["id"],
+                f"Appointment: {booking['client_name']}",
+                start_dt, duration,
+                color_id=calendar_service.COLOR_GREEN,
+            )
+            end_dt = start_dt + datetime.timedelta(minutes=duration)
+            day_str = _format_date_header(start_dt)
+            await query.edit_message_text(
+                f"✅ Booked — *Appointment: {booking['client_name']}* on {day_str} "
+                f"at {start_dt.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')} · Appointments 🟢",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            session_memory.record_action(
+                user_id, action="create", title=event["title"],
+                start_dt=start_dt, duration_minutes=duration,
+                calendar_id=appt_cal["id"], calendar_name=appt_cal["name"],
+                event_id=event["id"],
+            )
+
+        elif value == "no":
+            session.pending_appointment_booking = None
+            await query.edit_message_text("Cancelled. Let me know when you'd like to book.")
+        return
+
+
+# ---------------------------------------------------------------------------
 # Clash / multi-match resolution
 # ---------------------------------------------------------------------------
 
@@ -610,7 +874,7 @@ async def _resolve_clash_pick(
     slots = s.clash_slots
 
     if choice < 1 or choice > len(slots):
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"Please reply with a number between 1 and {len(slots)}."
         )
         return
@@ -624,7 +888,7 @@ async def _resolve_clash_pick(
         )
         day_str = _format_date_header(chosen_start)
         time_str = chosen_start.strftime("%-I:%M %p")
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"✅ Event created — *{event['title']}* on {day_str} at {time_str} · {s.calendar_name}",
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -645,7 +909,7 @@ async def _resolve_clash_pick(
         )
         day_str = _format_date_header(chosen_start)
         time_str = chosen_start.strftime("%-I:%M %p")
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"📝 Updated — *{updated['title']}* now on {day_str} at {time_str} · {s.calendar_name}",
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -675,7 +939,7 @@ async def _resolve_match_pick(
     matches = s.pending_matches
 
     if choice < 1 or choice > len(matches):
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"Please reply with a number between 1 and {len(matches)}."
         )
         return
@@ -694,7 +958,7 @@ async def _resolve_match_pick(
     elif action == "delete":
         calendar_service.delete_event(service, event["calendar_id"], event["id"])
         day_str = event["start"].strftime("%a %-d %b")
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"🗑️ Deleted — *{event['title']}* on {day_str}",
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -728,13 +992,13 @@ async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text
             svc = calendar_service.build_service(creds)
             _calendars_cache = calendar_service.list_calendars(svc)
             cal_names = ", ".join(c["name"] for c in _calendars_cache)
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 f"✅ Connected! Found {len(_calendars_cache)} calendar(s): {cal_names}\n\n"
                 "Try: 'What do I have tomorrow?' or 'Add a meeting at 3pm'"
             )
         except Exception as exc:
             logger.error("OAuth exchange failed: %s", exc)
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 "❌ That code didn't work. Use /start to try again."
             )
         return
@@ -745,111 +1009,11 @@ async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text
 
     service, calendars = _get_service_and_calendars()
     if service is None:
-        await update.message.reply_text("Google Calendar isn't connected. Use /start.")
+        await update.effective_message.reply_text("Google Calendar isn't connected. Use /start.")
         return
 
-    # --- Pending clash slot pick (1/2/3 or 'keep original') ---
-    if session.pending_clash:
-        text_lower = text.lower().strip()
-        if text_lower in ("keep original", "keep"):
-            # Override — create/edit at original time
-            session.pending_clash = False
-            duration = session.duration_minutes or DEFAULT_DURATION_MINUTES
-            if session.clash_pending_action == "create":
-                event = calendar_service.create_event(
-                    service, session.calendar_id, session.title,
-                    session.start_dt, duration
-                )
-                day_str = _format_date_header(session.start_dt)
-                time_str = session.start_dt.strftime("%-I:%M %p")
-                await update.message.reply_text(
-                    f"✅ Event created — *{event['title']}* on {day_str} at {time_str} · {session.calendar_name}",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                session_memory.record_action(
-                    user_id, action="create", title=event["title"],
-                    start_dt=session.start_dt, duration_minutes=duration,
-                    calendar_id=session.calendar_id, calendar_name=session.calendar_name,
-                    event_id=event["id"],
-                )
-            return
-
-        if text.strip().isdigit():
-            await _resolve_clash_pick(update, user_id, int(text.strip()), service, calendars)
-            return
-
-    # --- Pending multi-match selection ---
-    if session.pending_matches and text.strip().isdigit():
-        await _resolve_match_pick(update, user_id, int(text.strip()), service, calendars)
-        return
-
-    # --- Pending calendar pick (numbered reply) ---
-    if session.pending_calendar_pick and text.strip().isdigit():
-        choice = int(text.strip())
-        cal_list = session.pending_calendar_list
-        if 1 <= choice <= len(cal_list):
-            chosen_cal = cal_list[choice - 1]
-            intent = session.pending_calendar_intent
-            session.pending_calendar_pick = False
-            session.pending_calendar_list = []
-            session.pending_calendar_intent = None
-
-            start_dt = _resolve_datetime(intent)
-            duration = intent.get("duration_minutes") or DEFAULT_DURATION_MINUTES
-            intent["title"] = intent.get("title") or "New Event"
-
-            await _handle_create(
-                update, user_id, intent, service, calendars,
-                start_dt, duration, chosen_cal["id"], chosen_cal["name"],
-            )
-        else:
-            await update.message.reply_text(f"Please reply with a number between 1 and {len(cal_list)}.")
-        return
-
-    # --- Pending appointment booking confirmation (yes/no) ---
-    if session.pending_appointment_booking:
-        text_lower = text.lower().strip()
-        booking = session.pending_appointment_booking
-
-        if text_lower in ("yes", "y", "yeah", "yep", "ok", "okay", "confirm", "book it", "go ahead"):
-            session.pending_appointment_booking = None
-            appt_cal = calendar_service.find_appointments_calendar(calendars)
-            start_dt = booking["start_dt"]
-            duration = calendar_service.APPOINTMENT_DURATION_MINUTES
-
-            # Delete overlapping placeholder if there is one
-            if booking.get("placeholder_id"):
-                try:
-                    calendar_service.delete_event(service, appt_cal["id"], booking["placeholder_id"])
-                except Exception:
-                    pass  # already deleted or moved, continue anyway
-
-            # Create the confirmed green appointment at the requested time
-            event = calendar_service.create_event(
-                service, appt_cal["id"],
-                f"Appointment: {booking['client_name']}",
-                start_dt, duration,
-                color_id=calendar_service.COLOR_GREEN,
-            )
-            end_dt = start_dt + datetime.timedelta(minutes=duration)
-            day_str = _format_date_header(start_dt)
-            await update.message.reply_text(
-                f"✅ Booked — *Appointment: {booking['client_name']}* on {day_str} "
-                f"at {start_dt.strftime('%-I:%M %p')}–{end_dt.strftime('%-I:%M %p')} · Appointments 🟢",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            session_memory.record_action(
-                user_id, action="create", title=event["title"],
-                start_dt=start_dt, duration_minutes=duration,
-                calendar_id=appt_cal["id"], calendar_name=appt_cal["name"],
-                event_id=event["id"],
-            )
-            return
-
-        elif text_lower in ("no", "n", "nope", "cancel"):
-            session.pending_appointment_booking = None
-            await update.message.reply_text("Cancelled. Let me know when you'd like to book.")
-            return
+    # Pending states are now handled via inline keyboard callbacks.
+    # If the user types text while a pending state is active, route it as a new intent.
 
     # --- NLP intent parsing ---
     calendar_names = [c["name"] for c in calendars]
@@ -860,14 +1024,14 @@ async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text
     action = intent.get("action", "unknown")
 
     if action == "unknown":
-        await update.message.reply_text(UNKNOWN_REPLY)
+        await update.effective_message.reply_text(UNKNOWN_REPLY)
         return
 
     # --- Dispatch ---
     if action in ("create",):
         start_dt = _resolve_datetime(intent)
         if not start_dt:
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 "I need a date and time. Try: 'Add a meeting *tomorrow at 3pm*'"
             )
             return
@@ -879,15 +1043,11 @@ async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text
 
         # If unsure about calendar, ask before creating
         if hint == "ASK" or not hint:
-            cal_list = "\n".join(f"{i+1}. {c['name']}" for i, c in enumerate(calendars))
             s = session_memory.get(user_id)
             s.pending_calendar_pick = True
             s.pending_calendar_list = calendars
             s.pending_calendar_intent = intent
-            await update.message.reply_text(
-                f"Which calendar should I add *{title}* to?\n\n{cal_list}",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await _send_calendar_pick_buttons(update, title, calendars)
             return
 
         calendar_id = calendar_service.find_calendar_id(calendars, hint)
@@ -916,7 +1076,7 @@ async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text
         await _handle_correct(update, user_id, intent, service, calendars)
 
     else:
-        await update.message.reply_text(UNKNOWN_REPLY)
+        await update.effective_message.reply_text(UNKNOWN_REPLY)
 
 
 # ---------------------------------------------------------------------------
@@ -928,7 +1088,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     Transcribe a Telegram voice note via OpenAI Whisper, then route it
     through the same handle_message flow as a text message.
     """
-    await update.message.reply_text("🎙️ Transcribing...")
+    await update.effective_message.reply_text("🎙️ Transcribing...")
 
     voice = update.message.voice or update.message.audio
     tg_file = await context.bot.get_file(voice.file_id)
@@ -947,18 +1107,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         text = transcript.text.strip()
         if not text:
-            await update.message.reply_text("I couldn't make out what you said. Try again?")
+            await update.effective_message.reply_text("I couldn't make out what you said. Try again?")
             return
 
         logger.info("Voice transcribed: %s", text)
-        await update.message.reply_text(f'🎙️ _"{text}"_', parse_mode=ParseMode.MARKDOWN)
+        await update.effective_message.reply_text(f'🎙️ _"{text}"_', parse_mode=ParseMode.MARKDOWN)
 
         # Process transcribed text directly through the message handling logic
         await _process_text(update, context, text)
 
     except Exception as exc:
         logger.error("Voice transcription failed: %s", exc)
-        await update.message.reply_text("❌ Couldn't transcribe that. Please try again or type it.")
+        await update.effective_message.reply_text("❌ Couldn't transcribe that. Please try again or type it.")
     finally:
         import os
         os.unlink(tmp_path)
@@ -978,6 +1138,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
