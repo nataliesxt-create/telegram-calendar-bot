@@ -165,6 +165,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /reset — clear session state (pending clashes, picks, bookings).
+    """
+    user_id = update.effective_user.id
+    session_memory.clear(user_id)
+    await update.effective_message.reply_text("🔄 Session reset. What would you like to do?")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /help — display usage examples.
@@ -1158,6 +1167,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
