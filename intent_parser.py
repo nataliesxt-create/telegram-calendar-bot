@@ -76,9 +76,10 @@ Rules:
   15. "Team Meetings + Events": ONLY when user explicitly says "team".
   16. "Agency Events + Meetings": company/agency-wide events — congresses, boost events,
       company launches, Great Eastern, Craigasabel, agency-level gatherings.
-  17. "ASK": if none of the above apply clearly. Common cases that should always ASK:
-      meals/dinner/lunch/breakfast/coffee, catch-ups, social events with friends,
-      restaurant names, anything ambiguous. Do NOT guess — return "ASK".
+  17. "ASK": if none of the above 16 rules apply clearly. Set calendar_hint="ASK" —
+      do NOT change the action to "unknown". Common cases: meals, dinner, lunch,
+      breakfast, coffee, catch-ups, social events with friends, restaurant names.
+      The action is still "create" — only the calendar is uncertain.
 - is_correction: true when the user is amending their immediately previous instruction
   (phrases like "actually", "wait", "no make it", "change to", "instead").
 - action "correct": use when the user's message is clearly modifying the last action.
