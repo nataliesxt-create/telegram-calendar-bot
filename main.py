@@ -592,12 +592,13 @@ async def _handle_correct(
 
 async def _send_clash_buttons(
     update: Update,
-    clashing: list[dict],
+    clashing: dict,
     free_slots: list[datetime.datetime],
 ) -> None:
     """Send clash warning with inline slot buttons."""
-    clash_titles = ", ".join(e["title"] for e in clashing[:3])
-    lines = [f"⚠️ Clash with: *{clash_titles}*\n"]
+    clash_start = clashing["start"].strftime("%-I:%M %p")
+    clash_end = clashing["end"].strftime("%-I:%M %p")
+    lines = [f"⚠️ Clash with *{clashing['title']}* ({clash_start}–{clash_end})\n"]
 
     buttons = []
     for i, slot in enumerate(free_slots[:3]):
