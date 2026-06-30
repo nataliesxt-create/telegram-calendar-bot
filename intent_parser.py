@@ -51,6 +51,8 @@ Rules:
 - For ambiguous time-of-day words (morning/afternoon/evening/night), set time to null
   and let the application resolve them — do NOT guess.
 - duration_minutes: parse "30 min", "2 hours", "1.5 hours" etc.
+  Also parse time ranges like "1pm-2pm" or "5.30 to 8pm" as a duration (subtract start from end).
+  For edits: "change from 6pm to 9:30pm" means keep the start time, set duration to 3.5 hours — do NOT move the start time. Only move the start time if the user says "move to" or "reschedule to".
   If action is "book_appointment" OR calendar_hint is "Appointments", default to 90 minutes.
   For all other events default null (app will use its own default).
 - calendar_hint: infer from context using these strict rules in order:
@@ -83,6 +85,7 @@ Rules:
 - is_correction: true when the user is amending their immediately previous instruction
   (phrases like "actually", "wait", "no make it", "change to", "instead").
 - action "correct": use when the user's message is clearly modifying the last action.
+- action "edit": for changing an existing event. When user says "change [event] from X to Y" where X and Y are times, set time=X (original start), duration_minutes=(Y minus X). Do NOT set time=Y.
 - action "view": for queries about what's scheduled ("what's on", "show me", "do I have anything").
 - action "book_appointment": ONLY when the user is booking a named client/person into
   their Appointments calendar (they are the provider, not the recipient). Examples:
