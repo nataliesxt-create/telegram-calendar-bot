@@ -155,13 +155,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = session_memory.get(user_id)
     session.pending_auth_flow = flow
 
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔗 Authorise Google Calendar", url=auth_url)
+    ]])
     await update.effective_message.reply_text(
         "👋 Hi, I'm *Ouni* — your personal calendar assistant.\n\n"
-        "Let's connect your Google Calendar first:\n\n"
-        "1. Visit this link to authorise:\n"
-        f"{auth_url}\n\n"
-        "2. Copy the code Google gives you and send it here.",
+        "Tap the button below to connect your Google Calendar.\n"
+        "After authorising, copy the code Google gives you and send it here.",
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
     )
 
 
