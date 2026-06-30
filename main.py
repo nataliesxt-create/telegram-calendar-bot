@@ -1020,7 +1020,7 @@ async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text
         creds = auth.load_credentials()
         if creds:
             await update.effective_message.reply_text(
-                "👋 Hey! I'm here and connected to your calendar. What do you need?"
+                "Hey Nat! It's Ouni, I'm ready to lock in some events for your calendar! So what's up?"
             )
         else:
             await update.effective_message.reply_text(
