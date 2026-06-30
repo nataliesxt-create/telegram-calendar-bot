@@ -1006,12 +1006,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _process_text(update, context, text)
 
 
+_GREETINGS = {"hi", "hey", "hello", "helo", "hii", "yo", "sup", "heyyy", "heyy"}
+
 async def _process_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     """Core routing logic — shared by text messages and voice transcriptions."""
     user_id = update.effective_user.id
 
     session = session_memory.get(user_id)
     session_memory.touch(user_id)
+
+    # --- Greeting check ---
+    if text.lower().strip().rstrip("!").rstrip("?") in _GREETINGS:
+        creds = auth.load_credentials()
+        if creds:
+            await update.effective_message.reply_text(
+                "👋 Hey! I'm here and connected to your calendar. What do you need?"
+            )
+        else:
+            await update.effective_message.reply_text(
+                "👋 Hey! I'm here but not connected to Google Calendar yet. Send /start to connect."
+            )
+        return
 
     # --- OAuth code exchange ---
     if session.pending_auth_flow is not None:
