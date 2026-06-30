@@ -104,8 +104,11 @@ def load_credentials() -> Credentials | None:
         return None
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        _save_token(creds)
+        try:
+            creds.refresh(Request())
+            _save_token(creds)
+        except Exception:
+            return None  # token revoked — user must re-auth via /start
 
     return creds if creds and creds.valid else None
 
