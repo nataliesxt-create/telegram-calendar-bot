@@ -40,7 +40,7 @@ GOOGLE_SCOPES = [
 ]
 
 # File paths
-TOKEN_PATH = "token.json"
+TOKEN_PATH = "/data/token.json" if os.path.isdir("/data") else "token.json"
 CREDENTIALS_PATH = "credentials.json"  # downloaded from Google Cloud Console
 
 # Secrets from environment
