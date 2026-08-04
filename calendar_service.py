@@ -351,6 +351,48 @@ def find_placeholder_slots(
     return placeholders
 
 
+def get_recently_ended_appointments(
+    service,
+    appointments_cal: dict,
+    within_minutes: int = 10,
+) -> list[dict]:
+    """
+    Return confirmed (green) Appointments events whose end time falls within
+    the last `within_minutes` minutes.  Used by the post-appointment follow-up job.
+    """
+    now = datetime.datetime.now(tz=TZ)
+    time_min = now - datetime.timedelta(minutes=within_minutes + 1)
+    # timeMax filters by start time; use now + buffer so we catch long events
+    time_max = now + datetime.timedelta(minutes=1)
+
+    result = (
+        service.events()
+        .list(
+            calendarId=appointments_cal["id"],
+            timeMin=time_min.isoformat(),
+            timeMax=time_max.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    ended = []
+    for ev in result.get("items", []):
+        title = ev.get("summary", "")
+        if not title.strip().startswith(APPOINTMENT_PLACEHOLDER_PREFIX):
+            continue
+        if ev.get("colorId") != COLOR_GREEN:
+            continue  # only confirmed (green) appointments, not red placeholders
+        norm = _normalise(ev, appointments_cal["id"])
+        norm["calendar_name"] = appointments_cal["name"]
+        # Filter to events that actually ended in the window
+        if time_min <= norm["end"] <= now:
+            ended.append(norm)
+
+    return ended
+
+
 def book_appointment_slot(
     service,
     appointments_cal: dict,

@@ -8,7 +8,9 @@ and session memory into a fully async python-telegram-bot v20+ application.
 from __future__ import annotations
 
 import datetime
+import json
 import logging
+import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -29,7 +31,15 @@ import calendar_service
 import clash_detector
 import intent_parser
 import session_memory as sm_module
-from config import DEFAULT_DURATION_MINUTES, OPENAI_API_KEY, TELEGRAM_TOKEN, TIMEZONE, TZ
+from config import (
+    CHAT_ID_PATH,
+    DEFAULT_DURATION_MINUTES,
+    NOTIFIED_FOLLOWUPS_PATH,
+    OPENAI_API_KEY,
+    TELEGRAM_TOKEN,
+    TIMEZONE,
+    TZ,
+)
 from intent_parser import UNKNOWN_REPLY, _client as openai_client
 
 logging.basicConfig(
@@ -1002,6 +1012,7 @@ async def _resolve_match_pick(
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route all non-command text messages."""
+    _save_chat_id(update.effective_chat.id)
     text = (update.message.text or "").strip()
     await _process_text(update, context, text)
 
@@ -1134,6 +1145,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     Transcribe a Telegram voice note via OpenAI Whisper, then route it
     through the same handle_message flow as a text message.
     """
+    _save_chat_id(update.effective_chat.id)
     await update.effective_message.reply_text("🎙️ Transcribing...")
 
     voice = update.message.voice or update.message.audio
@@ -1171,6 +1183,109 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # ---------------------------------------------------------------------------
+# Chat ID persistence (needed for proactive messages from background job)
+# ---------------------------------------------------------------------------
+
+def _save_chat_id(chat_id: int) -> None:
+    try:
+        with open(CHAT_ID_PATH, "w") as f:
+            f.write(str(chat_id))
+    except Exception as exc:
+        logger.warning("Could not save chat_id: %s", exc)
+
+
+def _load_chat_id() -> int | None:
+    try:
+        if os.path.exists(CHAT_ID_PATH):
+            with open(CHAT_ID_PATH) as f:
+                return int(f.read().strip())
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Notified follow-up tracker
+# ---------------------------------------------------------------------------
+
+def _load_notified() -> set[str]:
+    try:
+        if os.path.exists(NOTIFIED_FOLLOWUPS_PATH):
+            with open(NOTIFIED_FOLLOWUPS_PATH) as f:
+                return set(json.load(f))
+    except Exception:
+        pass
+    return set()
+
+
+def _save_notified(event_ids: set[str]) -> None:
+    try:
+        with open(NOTIFIED_FOLLOWUPS_PATH, "w") as f:
+            json.dump(list(event_ids), f)
+    except Exception as exc:
+        logger.warning("Could not save notified followups: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Post-appointment follow-up background job
+# ---------------------------------------------------------------------------
+
+async def _post_appt_followup_job(context) -> None:
+    """
+    Runs every 5 minutes. Checks for Appointments calendar events that just
+    ended and sends Nat a follow-up message asking for notes and to-dos.
+    """
+    chat_id = _load_chat_id()
+    if not chat_id:
+        return  # no chat ID yet — user hasn't messaged the bot
+
+    creds = auth.load_credentials()
+    if not creds:
+        return
+
+    try:
+        service = calendar_service.build_service(creds)
+        calendars = calendar_service.list_calendars(service)
+        appt_cal = calendar_service.find_appointments_calendar(calendars)
+        if not appt_cal:
+            return
+
+        ended = calendar_service.get_recently_ended_appointments(service, appt_cal, within_minutes=6)
+    except Exception as exc:
+        logger.error("Post-appt job: calendar fetch failed: %s", exc)
+        return
+
+    if not ended:
+        return
+
+    notified = _load_notified()
+    new_notified = False
+
+    for event in ended:
+        if event["id"] in notified:
+            continue
+
+        client_name = event["title"].removeprefix("Appointment:").strip()
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"Hey Nat! Your *Appointment: {client_name}* just wrapped up ✅\n\n"
+                    "What was this appointment about? And any to-dos to capture?"
+                ),
+                parse_mode="Markdown",
+            )
+            notified.add(event["id"])
+            new_notified = True
+            logger.info("Sent follow-up for appointment: %s", event["title"])
+        except Exception as exc:
+            logger.error("Failed to send follow-up for %s: %s", event["title"], exc)
+
+    if new_notified:
+        _save_notified(notified)
+
+
+# ---------------------------------------------------------------------------
 # App bootstrap
 # ---------------------------------------------------------------------------
 
@@ -1188,6 +1303,13 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+
+    # Post-appointment follow-up: check every 5 minutes
+    app.job_queue.run_repeating(
+        _post_appt_followup_job,
+        interval=300,  # 5 minutes
+        first=60,      # first run 60s after startup
+    )
 
     logger.info("Bot started — polling for updates...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
