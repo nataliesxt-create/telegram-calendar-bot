@@ -351,46 +351,42 @@ def find_placeholder_slots(
     return placeholders
 
 
-def get_recently_ended_appointments(
+def get_todays_confirmed_appointments(
     service,
     appointments_cal: dict,
-    within_minutes: int = 10,
+    date: datetime.date,
 ) -> list[dict]:
     """
-    Return confirmed (green) Appointments events whose end time falls within
-    the last `within_minutes` minutes.  Used by the post-appointment follow-up job.
+    Return confirmed (green) Appointment events on `date`.
+    Used by the morning scan to schedule end-of-appointment follow-up messages.
     """
-    now = datetime.datetime.now(tz=TZ)
-    time_min = now - datetime.timedelta(minutes=within_minutes + 1)
-    # timeMax filters by start time; use now + buffer so we catch long events
-    time_max = now + datetime.timedelta(minutes=1)
+    day_start = datetime.datetime(date.year, date.month, date.day, 0, 0, 0, tzinfo=TZ)
+    day_end = day_start + datetime.timedelta(days=1)
 
     result = (
         service.events()
         .list(
             calendarId=appointments_cal["id"],
-            timeMin=time_min.isoformat(),
-            timeMax=time_max.isoformat(),
+            timeMin=day_start.isoformat(),
+            timeMax=day_end.isoformat(),
             singleEvents=True,
             orderBy="startTime",
         )
         .execute()
     )
 
-    ended = []
+    confirmed = []
     for ev in result.get("items", []):
         title = ev.get("summary", "")
         if not title.strip().startswith(APPOINTMENT_PLACEHOLDER_PREFIX):
             continue
         if ev.get("colorId") != COLOR_GREEN:
-            continue  # only confirmed (green) appointments, not red placeholders
+            continue  # skip red placeholders, only green confirmed events
         norm = _normalise(ev, appointments_cal["id"])
         norm["calendar_name"] = appointments_cal["name"]
-        # Filter to events that actually ended in the window
-        if time_min <= norm["end"] <= now:
-            ended.append(norm)
+        confirmed.append(norm)
 
-    return ended
+    return confirmed
 
 
 def book_appointment_slot(

@@ -1230,17 +1230,46 @@ def _save_notified(event_ids: set[str]) -> None:
 # Post-appointment follow-up background job
 # ---------------------------------------------------------------------------
 
-async def _post_appt_followup_job(context) -> None:
+async def _send_appt_followup(context) -> None:
+    """One-shot job fired at the exact end time of an appointment."""
+    event_id: str = context.job.data["event_id"]
+    event_title: str = context.job.data["event_title"]
+    chat_id: int = context.job.data["chat_id"]
+
+    notified = _load_notified()
+    if event_id in notified:
+        return  # already sent (e.g. bot restarted and re-scheduled)
+
+    client_name = event_title.removeprefix("Appointment:").strip()
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"Hey Nat! Your *Appointment: {client_name}* just wrapped up ✅\n\n"
+                "What was this appointment about? And any to-dos to capture?"
+            ),
+            parse_mode="Markdown",
+        )
+        notified.add(event_id)
+        _save_notified(notified)
+        logger.info("Sent follow-up for appointment: %s", event_title)
+    except Exception as exc:
+        logger.error("Failed to send follow-up for %s: %s", event_title, exc)
+
+
+async def _schedule_todays_followups(context) -> None:
     """
-    Runs every 5 minutes. Checks for Appointments calendar events that just
-    ended and sends Nat a follow-up message asking for notes and to-dos.
+    Runs once at 8am SGT each day. Fetches today's confirmed appointments
+    and schedules a one-shot follow-up message for each one's end time.
     """
     chat_id = _load_chat_id()
     if not chat_id:
-        return  # no chat ID yet — user hasn't messaged the bot
+        logger.info("Daily appt scan: no chat_id saved yet, skipping.")
+        return
 
     creds = auth.load_credentials()
     if not creds:
+        logger.info("Daily appt scan: not authenticated, skipping.")
         return
 
     try:
@@ -1250,39 +1279,43 @@ async def _post_appt_followup_job(context) -> None:
         if not appt_cal:
             return
 
-        ended = calendar_service.get_recently_ended_appointments(service, appt_cal, within_minutes=6)
+        today = datetime.date.today()
+        events = calendar_service.get_todays_confirmed_appointments(service, appt_cal, today)
     except Exception as exc:
-        logger.error("Post-appt job: calendar fetch failed: %s", exc)
+        logger.error("Daily appt scan failed: %s", exc)
         return
 
-    if not ended:
+    if not events:
+        logger.info("Daily appt scan: no confirmed appointments today.")
         return
 
     notified = _load_notified()
-    new_notified = False
+    now = datetime.datetime.now(tz=TZ)
+    scheduled = 0
 
-    for event in ended:
+    for event in events:
         if event["id"] in notified:
-            continue
+            continue  # already followed up on a previous day
 
+        fire_at = event["end"]
+        if fire_at <= now:
+            continue  # already ended before the morning scan ran
+
+        context.job_queue.run_once(
+            _send_appt_followup,
+            when=fire_at,
+            data={
+                "event_id": event["id"],
+                "event_title": event["title"],
+                "chat_id": chat_id,
+            },
+            name=f"followup_{event['id']}",
+        )
         client_name = event["title"].removeprefix("Appointment:").strip()
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"Hey Nat! Your *Appointment: {client_name}* just wrapped up ✅\n\n"
-                    "What was this appointment about? And any to-dos to capture?"
-                ),
-                parse_mode="Markdown",
-            )
-            notified.add(event["id"])
-            new_notified = True
-            logger.info("Sent follow-up for appointment: %s", event["title"])
-        except Exception as exc:
-            logger.error("Failed to send follow-up for %s: %s", event["title"], exc)
+        logger.info("Scheduled follow-up for '%s' at %s", client_name, fire_at.strftime("%-I:%M %p"))
+        scheduled += 1
 
-    if new_notified:
-        _save_notified(notified)
+    logger.info("Daily appt scan: scheduled %d follow-up(s) for today.", scheduled)
 
 
 # ---------------------------------------------------------------------------
@@ -1304,11 +1337,11 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
-    # Post-appointment follow-up: check every 5 minutes
-    app.job_queue.run_repeating(
-        _post_appt_followup_job,
-        interval=300,  # 5 minutes
-        first=60,      # first run 60s after startup
+    # Post-appointment follow-up: scan calendar once at 8am SGT each day,
+    # then schedule precise one-shot messages at each appointment's end time.
+    app.job_queue.run_daily(
+        _schedule_todays_followups,
+        time=datetime.time(hour=8, minute=0, tzinfo=TZ),
     )
 
     logger.info("Bot started — polling for updates...")
