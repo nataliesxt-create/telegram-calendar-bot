@@ -177,6 +177,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_scanappts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /scanappts — manually trigger today's appointment scan and schedule follow-ups.
+    """
+    await update.effective_message.reply_text("🔍 Scanning today's appointments...")
+    await _schedule_todays_followups(context)
+    await update.effective_message.reply_text("✅ Done! Follow-ups scheduled for today's confirmed appointments.")
+
+
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /reset — clear session state (pending clashes, picks, bookings).
@@ -1333,6 +1342,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("scanappts", cmd_scanappts))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
