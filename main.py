@@ -1343,6 +1343,8 @@ def main() -> None:
         _schedule_todays_followups,
         time=datetime.time(hour=8, minute=0, tzinfo=TZ),
     )
+    # Also run at startup in case the bot restarted after 8am today
+    app.job_queue.run_once(_schedule_todays_followups, when=10)
 
     logger.info("Bot started — polling for updates...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
